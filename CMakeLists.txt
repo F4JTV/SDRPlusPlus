@@ -57,6 +57,27 @@ option(OPT_BUILD_RADIO "Main audio modulation decoder (AM, FM, SSB, etc...)" ON)
 option(OPT_BUILD_RYFI_DECODER "RyFi data link decoder" OFF)
 option(OPT_BUILD_VOR_RECEIVER "VOR beacon receiver" OFF)
 option(OPT_BUILD_WEATHER_SAT_DECODER "Build the HRPT decoder module (no dependencies required)" OFF)
+option(OPT_BUILD_ACARS_DECODER "Build the VHF ACARS decoder module (no dependencies required)" ON)
+option(OPT_BUILD_ADSB_DECODER "Build the ADS-B (1090 MHz) decoder module (no dependencies required)" ON)
+option(OPT_BUILD_AIS_DECODER "Build the AIS decoder module with TCP output (no dependencies required)" ON)
+option(OPT_BUILD_APRS_DECODER "Build the APRS decoder module (no dependencies required)" ON)
+option(OPT_BUILD_COSPAS_SARSAT_DECODER "Build the Cospas-Sarsat 406 MHz decoder module (no dependencies required)" ON)
+option(OPT_BUILD_CW_DECODER "Build the CW (Morse) decoder module (no dependencies required)" ON)
+option(OPT_BUILD_DAB_DECODER "Build the DAB/DAB+ decoder module" ON)
+option(OPT_BUILD_DRM_DECODER "Build the DRM (Digital Radio Mondiale) decoder module" ON)
+option(OPT_BUILD_DRM_IMAGE_DECODER "Build the HamDRM digital image (DRM SSTV) decoder (Dependencies: fftw3)" ON)
+option(OPT_BUILD_DSD_DECODER "Build the DSD-FME digital voice/data decoder module (needs the dsd-fme binary at runtime)" ON)
+option(OPT_BUILD_FT8_DECODER "Build the FT8/FT4/WSPR decoder module (Dependencies: fftw3)" ON)
+option(OPT_BUILD_GPS_DECODER "Build the GPS L1 C/A decoder module" ON)
+option(OPT_BUILD_MFSK_DECODER "Build the MFSK decoder module" ON)
+option(OPT_BUILD_PSK_DECODER "Build the PSK decoder module" ON)
+option(OPT_BUILD_RADIOSONDE_DECODER "Build the radiosonde decoder module (no dependencies required)" ON)
+option(OPT_BUILD_RTL_433_BRIDGE "Build the rtl_433 bridge module (links librtl_433, ~320 protocols; needs RTL_433_ROOT)" ON)
+option(OPT_BUILD_RTTY_DECODER "Build RTTY decoder" ON)
+option(OPT_BUILD_SSTV_DECODER "Build SSTV decoder" ON)
+option(OPT_BUILD_TETRA_DEMODULATOR "Build the TETRA demodulator module (no extra deps)" ON)
+option(OPT_BUILD_VDL2_DECODER "Build the VDL Mode 2 decoder module (no dependencies required)" ON)
+option(OPT_BUILD_WEFAX_DECODER "Build the WEFAX / HF radiofax decoder module (no dependencies required)" ON)
 
 # Misc
 option(OPT_BUILD_DISCORD_PRESENCE "Build the Discord Rich Presence module" ON)
@@ -67,6 +88,7 @@ option(OPT_BUILD_RIGCTL_CLIENT "Rigctl client to make SDR++ act as a panadapter"
 option(OPT_BUILD_RIGCTL_SERVER "Rigctl backend for controlling SDR++ with software like gpredict" ON)
 option(OPT_BUILD_SCANNER "Frequency scanner" ON)
 option(OPT_BUILD_SCHEDULER "Build the scheduler" OFF)
+option(OPT_BUILD_SDR_MAP_LAUNCHER "Launcher panel for the companion sdr_map Django web server" ON)
 
 # Other options
 option(USE_INTERNAL_LIBCORRECT "Use an internal version of libcorrect" ON)
@@ -308,6 +330,90 @@ if (OPT_BUILD_WEATHER_SAT_DECODER)
 add_subdirectory("decoder_modules/weather_sat_decoder")
 endif (OPT_BUILD_WEATHER_SAT_DECODER)
 
+if (OPT_BUILD_ACARS_DECODER)
+add_subdirectory("decoder_modules/acars_decoder")
+endif (OPT_BUILD_ACARS_DECODER)
+
+if (OPT_BUILD_ADSB_DECODER)
+add_subdirectory("decoder_modules/adsb_decoder")
+endif (OPT_BUILD_ADSB_DECODER)
+
+if (OPT_BUILD_AIS_DECODER)
+add_subdirectory("decoder_modules/ais_decoder")
+endif (OPT_BUILD_AIS_DECODER)
+
+if (OPT_BUILD_APRS_DECODER)
+add_subdirectory("decoder_modules/aprs_decoder")
+endif (OPT_BUILD_APRS_DECODER)
+
+if (OPT_BUILD_COSPAS_SARSAT_DECODER)
+add_subdirectory("decoder_modules/cospas_sarsat_decoder")
+endif (OPT_BUILD_COSPAS_SARSAT_DECODER)
+
+if (OPT_BUILD_CW_DECODER)
+add_subdirectory("decoder_modules/cw_decoder")
+endif (OPT_BUILD_CW_DECODER)
+
+if(OPT_BUILD_DAB_DECODER)
+add_subdirectory("decoder_modules/dab_decoder")
+endif(OPT_BUILD_DAB_DECODER)
+
+if (OPT_BUILD_DRM_DECODER)
+add_subdirectory("decoder_modules/drm_decoder")
+endif (OPT_BUILD_DRM_DECODER)
+
+if (OPT_BUILD_DRM_IMAGE_DECODER)
+add_subdirectory("decoder_modules/drm_image_decoder")
+endif (OPT_BUILD_DRM_IMAGE_DECODER)
+
+if (OPT_BUILD_DSD_DECODER)
+add_subdirectory("decoder_modules/dsd_decoder")
+endif (OPT_BUILD_DSD_DECODER)
+
+if (OPT_BUILD_FT8_DECODER)
+add_subdirectory("decoder_modules/ft8_decoder")
+endif (OPT_BUILD_FT8_DECODER)
+
+if (OPT_BUILD_GPS_DECODER)
+add_subdirectory("decoder_modules/gps_decoder")
+endif (OPT_BUILD_GPS_DECODER)
+
+if (OPT_BUILD_MFSK_DECODER)
+add_subdirectory("decoder_modules/mfsk_decoder")
+endif (OPT_BUILD_MFSK_DECODER)
+
+if (OPT_BUILD_PSK_DECODER)
+add_subdirectory("decoder_modules/psk_decoder")
+endif (OPT_BUILD_PSK_DECODER)
+
+if (OPT_BUILD_RADIOSONDE_DECODER)
+add_subdirectory("decoder_modules/radiosonde_decoder")
+endif (OPT_BUILD_RADIOSONDE_DECODER)
+
+if (OPT_BUILD_RTL_433_BRIDGE)
+add_subdirectory("decoder_modules/rtl_433_decoder")
+endif (OPT_BUILD_RTL_433_BRIDGE)
+
+if (OPT_BUILD_RTTY_DECODER)
+add_subdirectory("decoder_modules/rtty_decoder")
+endif (OPT_BUILD_RTTY_DECODER)
+
+if (OPT_BUILD_SSTV_DECODER)
+add_subdirectory("misc_modules/sstv_decoder")
+endif (OPT_BUILD_SSTV_DECODER)
+
+if (OPT_BUILD_TETRA_DEMODULATOR)
+add_subdirectory("decoder_modules/tetra_decoder")
+endif (OPT_BUILD_TETRA_DEMODULATOR)
+
+if (OPT_BUILD_VDL2_DECODER)
+add_subdirectory("decoder_modules/vdl2_decoder")
+endif (OPT_BUILD_VDL2_DECODER)
+
+if (OPT_BUILD_WEFAX_DECODER)
+add_subdirectory("decoder_modules/wefax_decoder")
+endif (OPT_BUILD_WEFAX_DECODER)
+
 
 # Misc
 if (OPT_BUILD_DISCORD_PRESENCE)
@@ -341,6 +447,10 @@ endif (OPT_BUILD_SCANNER)
 if (OPT_BUILD_SCHEDULER)
 add_subdirectory("misc_modules/scheduler")
 endif (OPT_BUILD_SCHEDULER)
+
+if (OPT_BUILD_SDR_MAP_LAUNCHER)
+add_subdirectory("misc_modules/sdr_map_launcher")
+endif (OPT_BUILD_SDR_MAP_LAUNCHER)
 
 if (MSVC)
     add_executable(sdrpp "src/main.cpp" "win32/resources.rc")

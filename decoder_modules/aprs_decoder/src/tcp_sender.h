@@ -195,7 +195,7 @@ private:
     static constexpr size_t MAX_QUEUE = 2000;
 
     std::string _host = "127.0.0.1";
-    int _port = 10111;
+    int _port = 10100;
     std::mutex cfgMtx;
 
     std::shared_ptr<net::Socket> sock;

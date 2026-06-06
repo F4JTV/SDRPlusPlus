@@ -134,7 +134,7 @@ Hovering an icon shows its 2-character code as a tooltip.
 ## 5. TCP output to the map (format)
 
 In the module: the **TCP output (map)** section → set *Host* (Django server IP)
-and *Port* (default **10111**), then tick **Send decoded positions**. The status
+and *Port* (default **10100**), then tick **Send decoded positions**. The status
 (Connected / Disconnected) and the *Sent / Dropped* counters are shown below.
 
 The module connects **as a TCP client** and sends **one JSON line per positioned
@@ -217,7 +217,7 @@ Copy the management command into your app, then run the collector:
 
 ```bash
 cp django/listen_aprs.py  <your_app>/management/commands/listen_aprs.py
-python manage.py listen_aprs --host 0.0.0.0 --port 10111
+python manage.py listen_aprs --host 0.0.0.0 --port 10100
 ```
 
 The `AprsContact` model, the WebSocket consumer, the routing and the Leaflet JS

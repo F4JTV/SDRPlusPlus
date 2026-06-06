@@ -34,7 +34,7 @@
 #   }
 #
 # Lancement :
-#   python manage.py listen_aprs --host 0.0.0.0 --port 10111
+#   python manage.py listen_aprs --host 0.0.0.0 --port 10100
 #
 # (Dans SDR++, régler le "TCP output (map)" du module sur l'IP/port de ce
 #  serveur, puis cocher "Send decoded positions".)
@@ -75,7 +75,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--host", default="0.0.0.0", help="Adresse d'écoute (défaut 0.0.0.0)")
-        parser.add_argument("--port", type=int, default=10111, help="Port d'écoute (défaut 10111)")
+        parser.add_argument("--port", type=int, default=10100, help="Port d'écoute (défaut 10100)")
 
     def handle(self, *args, **options):
         host = options["host"]

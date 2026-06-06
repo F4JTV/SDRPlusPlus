@@ -259,8 +259,8 @@ ws.onclose = () => setTimeout(() => location.reload(), 5000); // reconnexion sim
 daphne -b 0.0.0.0 -p 8000 <projet>.asgi:application
 
 # Terminal 2 — collecteur TCP APRS :
-python manage.py listen_aprs --host 0.0.0.0 --port 10111
+python manage.py listen_aprs --host 0.0.0.0 --port 10100
 
 # Dans SDR++ : module aprs_decoder -> TCP output -> Host = IP du serveur Django,
-# Port = 10111, cocher "Send decoded positions".
+# Port = 10100, cocher "Send decoded positions".
 """

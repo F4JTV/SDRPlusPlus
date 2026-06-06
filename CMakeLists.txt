@@ -399,7 +399,7 @@ add_subdirectory("decoder_modules/rtty_decoder")
 endif (OPT_BUILD_RTTY_DECODER)
 
 if (OPT_BUILD_SSTV_DECODER)
-add_subdirectory("misc_modules/sstv_decoder")
+add_subdirectory("decoder_modules/sstv_decoder")
 endif (OPT_BUILD_SSTV_DECODER)
 
 if (OPT_BUILD_TETRA_DEMODULATOR)

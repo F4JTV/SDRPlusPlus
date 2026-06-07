@@ -36,6 +36,7 @@
       <span class="stat" data-type="radiosonde"><b id="count-SONDE">0</b> Sondes</span>
       <span class="stat" data-type="TETRA"><b id="count-TETRA">0</b> TETRA</span>
       <span class="stat" data-type="SARSAT"><b id="count-SARSAT">0</b> SARSAT</span>
+      <span class="stat" data-type="satellite"><b id="count-SAT">0</b> Sat</span>
     </div>
     <div class="link" id="conn">
       <span class="dot"></span><span id="conn-text">connecting…</span>
@@ -88,6 +89,10 @@
       <label class="chk" data-type="SARSAT">
         <input type="checkbox" class="f-type" value="SARSAT" checked>
         <span class="swatch" data-type="SARSAT"></span><span>Cospas-Sarsat — 406 MHz beacons</span>
+      </label>
+      <label class="chk" data-type="satellite">
+        <input type="checkbox" class="f-type" value="satellite" checked>
+        <span class="swatch" data-type="satellite"></span><span>Satellites — orbital trackers</span>
       </label>
       <hr>
       <label class="chk chk-all">

@@ -240,6 +240,54 @@ _MID_TABLE = {
 }
 
 
+# Reverse lookup: country name (upper-case) -> ISO 2-letter code.
+# Derived from the MID table above; covers ~190 countries. Used by the
+# Cospas-Sarsat ingestion: beacons carry "country=France" in their info
+# string, and we want to render the same flag SVGs as AIS does. A few
+# common name variants are added by hand below.
+_COUNTRY_NAME_TO_ISO = {}
+for _iso, _name in _MID_TABLE.values():
+    _COUNTRY_NAME_TO_ISO.setdefault(_name.upper(), _iso)
+# Aliases: Cospas-Sarsat uses some country names that don't match the AIS
+# table exactly. Add the most common ones.
+for _alt, _iso in {
+    "UNITED STATES": "US", "USA": "US", "UNITED STATES OF AMERICA": "US",
+    "UNITED KINGDOM": "GB", "UK": "GB", "GREAT BRITAIN": "GB",
+    "SOUTH KOREA": "KR", "KOREA (REPUBLIC OF)": "KR",
+    "NORTH KOREA": "KP", "KOREA (DEM. PEOPLE'S REP. OF)": "KP",
+    "RUSSIA": "RU", "RUSSIAN FEDERATION": "RU",
+    "CZECH REPUBLIC": "CZ", "CZECHIA": "CZ",
+    "VIET NAM": "VN", "VIETNAM": "VN",
+    "TAIWAN": "TW",
+    "IVORY COAST": "CI", "CÔTE D'IVOIRE": "CI",
+    "BURMA": "MM", "MYANMAR": "MM",
+    "MOLDOVA": "MD",
+    "BOLIVIA": "BO",
+    "VENEZUELA": "VE",
+    "TANZANIA": "TZ",
+}.items():
+    _COUNTRY_NAME_TO_ISO.setdefault(_alt, _iso)
+
+
+def _parse_kv_info(info):
+    """Parse a ``key=value;key=value`` string into a dict.
+
+    Used for the Cospas-Sarsat ``info`` field, which packs structured beacon
+    metadata as ``beacon=EPIRB;country=France;protocol=...``. Values can
+    contain spaces (e.g. "EPIRB with MMSI") but not ``;`` or ``=``.
+    """
+    out = {}
+    for pair in (info or "").split(";"):
+        pair = pair.strip()
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if k:
+                out[k] = v
+    return out
+
+
 def classify_mmsi(mmsi):
     """
     Return (kind, label, mid, country_iso, country_name) for an MMSI.
@@ -548,6 +596,12 @@ class Command(BaseCommand):
                     f"  TETRA rejected (no SSI): name={name!r} info={info[:60]!r}"))
                 return
             ident = f"SSI:{ssi}"
+        elif obj_type == SdrObject.TYPE_SARSAT:
+            # Cospas-Sarsat: the 15-character beacon Hex ID (in `name`) is the
+            # unique global identifier of the beacon. Normalise to upper case
+            # so case mismatches between transmissions don't create duplicates.
+            hex_id = (name or "").strip().upper()
+            ident = f"SARSAT:{hex_id}" if hex_id else f"sarsat:{lat:.4f},{lon:.4f}"
         else:  # APRS / APRS Meteo: callsign/name is authoritative
             ident = name or f"{obj_type}:{lat:.4f},{lon:.4f}"
 
@@ -633,6 +687,40 @@ class Command(BaseCommand):
                     extra["gps_acc_m"] = float(m.group(1))
                 except ValueError:
                     pass
+
+        # Cospas-Sarsat (406 MHz distress beacons): the info field is
+        # structured as "beacon=EPIRB;country=France;protocol=...". We parse
+        # it once and promote the relevant fields into extra under sarsat_*
+        # keys so to_dict() surfaces them cleanly. We also try to resolve the
+        # country name to an ISO code so the popup can show the same flag SVG
+        # used by AIS.
+        if obj_type == SdrObject.TYPE_SARSAT:
+            kv = _parse_kv_info(info)
+            # Top-level country fields (shared with AIS): country in clear
+            # plus ISO code when we can resolve it.
+            country_clear = kv.get("country", "").strip()
+            if country_clear:
+                extra["country_name"] = country_clear
+                iso = _COUNTRY_NAME_TO_ISO.get(country_clear.upper())
+                if iso:
+                    extra["country_iso"] = iso
+            # SARSAT-specific fields promoted to extra under sarsat_* prefix.
+            # The "test" flag is a real boolean; other fields stay as strings.
+            for k_src, k_dst in (
+                ("beacon",    "sarsat_beacon"),
+                ("protocol",  "sarsat_protocol"),
+                ("aircraft",  "sarsat_aircraft"),
+                ("callsign",  "sarsat_callsign"),
+                ("serial",    "sarsat_serial"),
+                ("operator",  "sarsat_operator"),
+                ("src",       "sarsat_src"),
+                ("homing121", "sarsat_homing121"),
+                ("bch1",      "sarsat_bch1"),
+                ("bch2",      "sarsat_bch2"),
+            ):
+                if k_src in kv:
+                    extra[k_dst] = kv[k_src]
+            extra["sarsat_test"] = (kv.get("test", "").lower() == "yes")
 
         defaults = {
             "name": name,

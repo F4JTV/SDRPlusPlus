@@ -31,6 +31,7 @@ class SdrObject(models.Model):
     TYPE_LRRP = "lrrp"
     TYPE_RADIOSONDE = "radiosonde"
     TYPE_TETRA = "TETRA"
+    TYPE_SARSAT = "SARSAT"
     TYPE_CHOICES = [
         (TYPE_AIS, "AIS (ships)"),
         (TYPE_ADSB, "ADS-B (aircraft)"),
@@ -39,6 +40,7 @@ class SdrObject(models.Model):
         (TYPE_LRRP, "LRRP / DMR GPS (DSD-FME)"),
         (TYPE_RADIOSONDE, "Radiosonde"),
         (TYPE_TETRA, "TETRA (LIP)"),
+        (TYPE_SARSAT, "Cospas-Sarsat (406 MHz beacons)"),
     ]
 
     # --- Identity --------------------------------------------------------- #
@@ -120,6 +122,20 @@ class SdrObject(models.Model):
             "mid": (self.extra or {}).get("mid"),
             "country_iso": (self.extra or {}).get("country_iso"),
             "country_name": (self.extra or {}).get("country_name"),
+            # Cospas-Sarsat 406 MHz beacon fields (extracted from `info` and
+            # stored in extra by listen_sdr). Surfaced at top level so the
+            # client picks them up without digging into extra.
+            "sarsat_beacon":    (self.extra or {}).get("sarsat_beacon"),
+            "sarsat_protocol":  (self.extra or {}).get("sarsat_protocol"),
+            "sarsat_aircraft":  (self.extra or {}).get("sarsat_aircraft"),
+            "sarsat_callsign":  (self.extra or {}).get("sarsat_callsign"),
+            "sarsat_serial":    (self.extra or {}).get("sarsat_serial"),
+            "sarsat_operator":  (self.extra or {}).get("sarsat_operator"),
+            "sarsat_src":       (self.extra or {}).get("sarsat_src"),
+            "sarsat_homing121": (self.extra or {}).get("sarsat_homing121"),
+            "sarsat_bch1":      (self.extra or {}).get("sarsat_bch1"),
+            "sarsat_bch2":      (self.extra or {}).get("sarsat_bch2"),
+            "sarsat_test":      (self.extra or {}).get("sarsat_test"),
             "weather": {
                 "temp_c": self.temp_c,
                 "humidity": self.humidity,
@@ -182,6 +198,7 @@ class RetentionSetting(models.Model):
         SdrObject.TYPE_LRRP: 60,
         SdrObject.TYPE_RADIOSONDE: 60,
         SdrObject.TYPE_TETRA: 30,
+        SdrObject.TYPE_SARSAT: 120,
     }
 
     obj_type = models.CharField(

@@ -95,20 +95,21 @@
     "radiosonde": L.layerGroup().addTo(map),
     "TETRA": L.layerGroup().addTo(map),
     "SARSAT": L.layerGroup().addTo(map),
+    "satellite": L.layerGroup().addTo(map),
   };
   const markers = new Map();        // id -> L.marker
   const objectsById = new Map();    // id -> data
   const histories = new Map();      // id -> [[lat,lon], ...] (trajet)
   const trails = new Map();         // id -> L.polyline (trace)
 
-  const CLASS = { "AIS": "t-AIS", "ADSB": "t-ADSB", "APRS": "t-APRS", "APRS Meteo": "t-METEO", "lrrp": "t-LRRP", "radiosonde": "t-SONDE", "TETRA": "t-TETRA", "SARSAT": "t-SARSAT" };
+  const CLASS = { "AIS": "t-AIS", "ADSB": "t-ADSB", "APRS": "t-APRS", "APRS Meteo": "t-METEO", "lrrp": "t-LRRP", "radiosonde": "t-SONDE", "TETRA": "t-TETRA", "SARSAT": "t-SARSAT", "satellite": "t-SAT" };
   // Libellé lisible affiché dans les popups (le champ "type" reste la clé).
-  const TYPE_LABEL = { "lrrp": "LRRP", "radiosonde": "SONDE", "TETRA": "TETRA", "SARSAT": "SARSAT" };
+  const TYPE_LABEL = { "lrrp": "LRRP", "radiosonde": "SONDE", "TETRA": "TETRA", "SARSAT": "SARSAT", "satellite": "SAT" };
   // Couleurs des traces (alignées sur le CSS par type).
   const TRAIL_COLOR = {
     "AIS": "#22d3ee", "ADSB": "#f6a609", "APRS": "#34d399",
     "APRS Meteo": "#a78bfa", "lrrp": "#f472b6", "radiosonde": "#facc15",
-    "TETRA": "#fb923c", "SARSAT": "#dc2626",
+    "TETRA": "#fb923c", "SARSAT": "#dc2626", "satellite": "#818cf8",
   };
   const MAX_TRAIL = 200;            // nombre max de positions conservées par objet
   let showTrails = true;            // piloté par la case « Afficher les traces »
@@ -218,6 +219,31 @@
     '<circle cx="16" cy="16" r="2.5" fill="rgba(255,255,255,0.95)"/>' +
     '</svg>';
 
+  // Satellite (orbital tracker): top-down view, central body with antenna +
+  // two solar panels with their characteristic grid pattern. Doesn't rotate
+  // (the sub-satellite point on the ground moves along the ground track,
+  // there's no meaningful "heading" for a top-down satellite icon).
+  const SAT_SVG =
+    '<svg viewBox="0 0 24 24" width="24" height="22" fill="currentColor" ' +
+    'xmlns="http://www.w3.org/2000/svg">' +
+    // Left solar panel with grid lines
+    '<rect x="1" y="9" width="7" height="6" rx="0.3"/>' +
+    '<line x1="3.3" y1="9" x2="3.3" y2="15" stroke="rgba(7,11,18,0.85)" stroke-width="0.5"/>' +
+    '<line x1="5.6" y1="9" x2="5.6" y2="15" stroke="rgba(7,11,18,0.85)" stroke-width="0.5"/>' +
+    '<line x1="1" y1="12" x2="8" y2="12" stroke="rgba(7,11,18,0.85)" stroke-width="0.5"/>' +
+    // Central body
+    '<rect x="9" y="7" width="6" height="10" rx="0.8"/>' +
+    // Antenna on top
+    '<rect x="11.5" y="4" width="1" height="3"/>' +
+    '<circle cx="12" cy="3.5" r="0.8" fill="rgba(7,11,18,0.85)" ' +
+    'stroke="currentColor" stroke-width="0.4"/>' +
+    // Right solar panel with grid lines
+    '<rect x="16" y="9" width="7" height="6" rx="0.3"/>' +
+    '<line x1="18.3" y1="9" x2="18.3" y2="15" stroke="rgba(7,11,18,0.85)" stroke-width="0.5"/>' +
+    '<line x1="20.6" y1="9" x2="20.6" y2="15" stroke="rgba(7,11,18,0.85)" stroke-width="0.5"/>' +
+    '<line x1="16" y1="12" x2="23" y2="12" stroke="rgba(7,11,18,0.85)" stroke-width="0.5"/>' +
+    '</svg>';
+
   // Glyphes pour les types NON orientés (pas de cap).
   const GLYPH = {
     "APRS": "✚", "APRS Meteo": "☂", "lrrp": "⌖",
@@ -276,6 +302,14 @@
       // `sarsat-test` class added to the parent .sdr-marker by makeIcon.
       return `<span class="glyph sarsat">${SARSAT_SVG}</span>`;
     }
+    if (o.type === "satellite") {
+      // Top-down satellite: no rotation. If the satellite is below the
+      // horizon for the local observer (el < 0), the marker is dimmed via
+      // the `below-horizon` class added by makeIcon — still on the map
+      // (sub-satellite point is meaningful even when not visible from the
+      // QTH), but visually softer.
+      return `<span class="glyph satellite">${SAT_SVG}</span>`;
+    }
     return `<span class="glyph" style="${rot}">${GLYPH[o.type] || "•"}</span>`;
   }
 
@@ -285,7 +319,13 @@
     // For SARSAT beacons in test mode, append a class so the CSS swaps to
     // amber and disables the distress pulse animation. Real distress
     // beacons keep the default red colour and pulse.
-    const extraCls = (o.type === "SARSAT" && o.sarsat_test) ? " sarsat-test" : "";
+    // For satellites below the local horizon (el<0), dim the icon so the
+    // operator instantly sees the bird is not in view from the QTH.
+    let extraCls = "";
+    if (o.type === "SARSAT" && o.sarsat_test) extraCls += " sarsat-test";
+    if (o.type === "satellite" && typeof o.sat_el === "number" && o.sat_el < 0) {
+      extraCls += " below-horizon";
+    }
     return L.divIcon({
       className: "",
       iconSize: [24, 24], iconAnchor: [12, 12],
@@ -383,6 +423,36 @@
         grid += row("BCH", fmt(o.sarsat_bch1) + " / " + fmt(o.sarsat_bch2));
       }
     }
+    // Satellite tracker: look angles + Doppler + footprint. Sub-satellite
+    // point is already shown as Lat/Lon at the top of the popup.
+    if (o.type === "satellite") {
+      if (o.sat_norad != null) grid += row("NORAD", o.sat_norad);
+      if (o.sat_alt_km != null) grid += row("Altitude", o.sat_alt_km + " km");
+      if (o.sat_az != null) {
+        // Compass-style hint next to the bearing for quick orientation.
+        const dirs = ["N","NE","E","SE","S","SW","W","NW","N"];
+        const compass = dirs[Math.round(((o.sat_az % 360) + 360) % 360 / 45)];
+        grid += row("Azimuth", `${o.sat_az.toFixed(1)}° (${compass})`);
+      }
+      if (o.sat_el != null) {
+        const below = o.sat_el < 0 ? " (below horizon)" : "";
+        grid += row("Elevation", `${o.sat_el.toFixed(1)}°${below}`);
+      }
+      if (o.sat_range_km != null) grid += row("Range", o.sat_range_km + " km");
+      if (o.sat_doppler_hz != null) {
+        // Above 1 kHz, show kHz with 2 decimals; otherwise raw Hz. Always
+        // signed so + means approaching, − means receding.
+        const d = o.sat_doppler_hz;
+        const txt = Math.abs(d) >= 1000
+          ? `${(d / 1000).toFixed(2)} kHz`
+          : `${d} Hz`;
+        const sign = d > 0 ? "+" : "";
+        grid += row("Doppler", sign + txt);
+      }
+      if (o.sat_footprint_km != null) {
+        grid += row("Footprint", o.sat_footprint_km + " km Ø");
+      }
+    }
     if (o.type === "radiosonde") {
       if (o.altitude_m != null) grid += row("Altitude", Math.round(o.altitude_m) + " m");
       if (o.climb_rate != null) {
@@ -405,9 +475,9 @@
     if (w.wind_dir != null) grid += row("Wind dir.", Math.round(w.wind_dir) + "°");
     if (w.pressure_hpa != null) grid += row("Pressure", w.pressure_hpa + " hPa");
     if (w.rain_mm != null) grid += row("Rain", w.rain_mm + " mm");
-    // For SARSAT we already parsed `info` into structured rows above, so
-    // hide the raw "beacon=...;country=..." dump.
-    const showRawInfo = o.info && o.type !== "SARSAT";
+    // For SARSAT and satellite we already parsed `info` into structured
+    // rows above, so hide the raw "key=value;..." dump.
+    const showRawInfo = o.info && o.type !== "SARSAT" && o.type !== "satellite";
     const info = showRawInfo ? `<div class="popup-info">${escapeHtml(o.info)}</div>` : "";
     const ds = `data-type="${escapeHtml(o.type)}" data-ident="${escapeHtml(o.ident)}"`;
     const actions = `<div class="popup-actions">
@@ -520,7 +590,7 @@
   }
 
   function refreshCounts() {
-    const c = { "AIS": 0, "ADSB": 0, "APRS": 0, "APRS Meteo": 0, "lrrp": 0, "radiosonde": 0, "TETRA": 0, "SARSAT": 0 };
+    const c = { "AIS": 0, "ADSB": 0, "APRS": 0, "APRS Meteo": 0, "lrrp": 0, "radiosonde": 0, "TETRA": 0, "SARSAT": 0, "satellite": 0 };
     objectsById.forEach((o) => { if (o.type in c) c[o.type]++; });
     document.getElementById("count-AIS").textContent = c["AIS"];
     document.getElementById("count-ADSB").textContent = c["ADSB"];
@@ -530,6 +600,7 @@
     document.getElementById("count-SONDE").textContent = c["radiosonde"];
     document.getElementById("count-TETRA").textContent = c["TETRA"];
     document.getElementById("count-SARSAT").textContent = c["SARSAT"];
+    document.getElementById("count-SAT").textContent = c["satellite"];
   }
 
   // ----------------------------------------------------- Filtres (UI) ------
@@ -862,6 +933,7 @@
     "radiosonde": "Radiosondes",
     "TETRA": "TETRA — handhelds",
     "SARSAT": "Cospas-Sarsat beacons",
+    "satellite": "Satellites (orbital)",
   };
   const retentionList = document.getElementById("retention-list");
   const retentionStatus = document.getElementById("retention-status");

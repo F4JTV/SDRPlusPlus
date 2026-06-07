@@ -25,6 +25,7 @@
   --c-tetra:  #fb923c;   /* orange, TETRA radios */
   --c-sarsat:      #dc2626; /* red, Cospas-Sarsat distress beacons */
   --c-sarsat-test: #fbbf24; /* amber, SARSAT in test mode          */
+  --c-sat:         #818cf8; /* indigo, orbital satellites          */
   --c-accent: #ff4d6d;   /* red, ops/distress    */
   --c-aton:   #fbbf24;   /* AtoN diamond (yellow)*/
   --c-coast:  #34d399;   /* coast station        */
@@ -48,6 +49,7 @@ body.light-bg {
   --c-tetra:  #c2410c;   /* deeper orange        */
   --c-sarsat:      #991b1b;
   --c-sarsat-test: #b45309;
+  --c-sat:         #4338ca;
   --c-accent: #b91c1c;   /* darker red           */
   --c-aton:   #b45309;   /* darker yellow for diamond */
   --c-coast:  #047857;   /* dark green           */
@@ -105,6 +107,7 @@ html, body {
 .stat[data-type="radiosonde"] b { color: var(--c-sonde); }
 .stat[data-type="TETRA"] b { color: var(--c-tetra); }
 .stat[data-type="SARSAT"] b { color: var(--c-sarsat); }
+.stat[data-type="satellite"] b { color: var(--c-sat); }
 
 /* Bouton « Effacer la carte » dans la barre supérieure */
 .topbar-btn {
@@ -203,6 +206,7 @@ html, body {
 .swatch[data-type="radiosonde"] { background: var(--c-sonde); }
 .swatch[data-type="TETRA"] { background: var(--c-tetra); }
 .swatch[data-type="SARSAT"] { background: var(--c-sarsat); }
+.swatch[data-type="satellite"] { background: var(--c-sat); }
 
 /* Boutons */
 .btn {
@@ -300,6 +304,11 @@ html, body {
   width: 22px; height: 22px; font-size: 0;
 }
 .sdr-marker .glyph.sarsat svg { display: block; }
+/* Satellite (top-down view): wider than tall because of the solar panels. */
+.sdr-marker .glyph.satellite {
+  width: 24px; height: 22px; font-size: 0;
+}
+.sdr-marker .glyph.satellite svg { display: block; }
 /* AIS sub-categories: each renders as its own SVG, sized + coloured here.
    AtoN, coast stations and distress beacons have their own colour so the
    operator can tell them apart from regular ships at a glance. */
@@ -356,6 +365,9 @@ html, body {
 .sdr-marker.t-SARSAT:not(.sarsat-test) .glyph.sarsat {
   animation: distress-pulse 1.4s ease-in-out infinite;
 }
+/* Satellites: indigo, dimmed when below the local horizon (el < 0). */
+.sdr-marker.t-SAT { color: var(--c-sat); }
+.sdr-marker.t-SAT.below-horizon { opacity: 0.45; }
 .sdr-marker .label {
   position: absolute; top: 22px; left: 50%; transform: translateX(-50%);
   font-family: var(--mono); font-size: 10px; font-weight: 500; white-space: nowrap;

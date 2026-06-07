@@ -422,6 +422,36 @@ class Command(BaseCommand):
         # already handle concurrency; this extra lock prevents any remaining
         # contention and keeps transactions short and ordered.
         self._db_lock = threading.Lock()
+
+        # --- Coalescing + batch writer ---------------------------------------
+        # Multiple modules pumping positions concurrently used to saturate the
+        # DB lock: a single write cycle (SELECT + INSERT + track INSERT +
+        # fsync) takes 30-50 ms on SQLite, so 50 ADS-B updates/sec consume the
+        # lock 100% of the time and other modules (satellite tracker, etc.)
+        # see their updates starve.
+        #
+        # Fix: pending updates are coalesced per (obj_type, ident) into a dict
+        # — newer position overwrites older — and a single worker thread
+        # drains the dict every BATCH_INTERVAL seconds, writing all of them
+        # in ONE atomic transaction. Net effect:
+        #   - one fsync per cycle instead of one per trame (~10× speedup),
+        #   - duplicate positions for the same object within a cycle are
+        #     deduplicated for free,
+        #   - the TCP-reader threads return instantly (just a dict insert),
+        #     never blocked by SQLite contention.
+        # The visual delay (< BATCH_INTERVAL) is imperceptible (well below
+        # the GPS update cadence of any of the decoders).
+        self._pending = {}                       # (obj_type, ident) -> trame
+        self._pending_lock = threading.Lock()
+        # In-memory cache of the last (lat, lon) recorded per object, to skip
+        # the SELECT-last-track query that the batch writer would otherwise
+        # have to do for each ident.
+        self._last_track_pos = {}                # (obj_type, ident) -> (lat, lon)
+        self._BATCH_INTERVAL = 0.15              # 150 ms — see comment above
+        writer = threading.Thread(target=self._batch_writer_loop, daemon=True)
+        writer.start()
+        # ----------------------------------------------------------------------
+
         purger = threading.Thread(target=self._purge_loop, daemon=True)
         purger.start()
 
@@ -510,7 +540,54 @@ class Command(BaseCommand):
             self._stop.set()
             server.shutdown()
             server.server_close()
+            # Drain any trames left in the coalescing queue before exit, so
+            # the last frames received don't get lost in the 150 ms window
+            # between arrival and the next batch tick.
+            self._flush_pending_once()
             self._log(self.style.WARNING("Server stopped."))
+
+    def _flush_pending_once(self):
+        """Final drain of the coalescing queue, called once at shutdown.
+
+        Mirrors the body of _batch_writer_loop but runs synchronously and
+        doesn't loop. Safe to call after `_stop` has been set: the writer
+        thread will exit on its own (via _stop.wait) without competing for
+        the pending dict."""
+        with self._pending_lock:
+            if not self._pending:
+                return
+            batch = self._pending
+            self._pending = {}
+        try:
+            with self._db_lock, transaction.atomic():
+                tracks = []
+                for (obj_type, ident), item in batch.items():
+                    defaults = item["defaults"]
+                    create_defaults = item["create_defaults"]
+                    if create_defaults is not None:
+                        SdrObject.objects.update_or_create(
+                            obj_type=obj_type, ident=ident,
+                            defaults=defaults, create_defaults=create_defaults,
+                        )
+                    else:
+                        SdrObject.objects.update_or_create(
+                            obj_type=obj_type, ident=ident, defaults=defaults,
+                        )
+                    track_alt_ft = item["altitude_ft"]
+                    if track_alt_ft is None and item["altitude_m"] is not None:
+                        track_alt_ft = int(round(item["altitude_m"] / 0.3048))
+                    tracks.append(SdrObjectTrack(
+                        obj_type=obj_type, ident=ident,
+                        lat=item["lat"], lon=item["lon"],
+                        speed=item["speed"], altitude_ft=track_alt_ft,
+                        timestamp=defaults["last_seen"],
+                    ))
+                if tracks:
+                    SdrObjectTrack.objects.bulk_create(tracks)
+            self._log(self.style.WARNING(
+                f"Flushed {len(batch)} pending trame(s) at shutdown."))
+        except Exception as exc:
+            self._log(self.style.ERROR(f"  Final flush failed: {exc}"))
 
     # --------------------------------------------------------------------- #
     def _process_line(self, line, peer):
@@ -804,50 +881,113 @@ class Command(BaseCommand):
                 create_defaults = dict(defaults)
                 create_defaults["name"] = f"MMSI {mmsi}" if mmsi else ""
 
-        # DB writes serialized + atomic transaction (the object and its track
-        # point are written together). The lock + WAL prevent
-        # "database is locked" even with many simultaneous modules.
-        with self._db_lock:
-            with transaction.atomic():
-                if create_defaults is not None:
-                    obj, created = SdrObject.objects.update_or_create(
-                        obj_type=obj_type, ident=ident,
-                        defaults=defaults, create_defaults=create_defaults,
-                    )
-                else:
-                    obj, created = SdrObject.objects.update_or_create(
-                        obj_type=obj_type, ident=ident, defaults=defaults,
-                    )
-
-                # --- Track history: one point per distinct position ---
-                last_pt = (SdrObjectTrack.objects
-                           .filter(obj_type=obj_type, ident=ident)
-                           .order_by("-timestamp")
-                           .values_list("lat", "lon")
-                           .first())
-                if last_pt is None or last_pt[0] != lat or last_pt[1] != lon:
-                    # Track/GPX altitude: feet (ADS-B) or metres converted
-                    # (radiosonde) for a consistent GPX elevation field.
-                    track_alt_ft = altitude_ft
-                    if track_alt_ft is None and altitude_m is not None:
-                        track_alt_ft = int(round(altitude_m / 0.3048))
-                    SdrObjectTrack.objects.create(
-                        obj_type=obj_type, ident=ident, lat=lat, lon=lon,
-                        speed=speed, altitude_ft=track_alt_ft,
-                        timestamp=defaults["last_seen"],
-                    )
-
-        flag = "NEW" if created else "upd"
-        self._log(f"  [{obj_type:10s}] {flag} {obj.name or obj.ident} "
+        # Push the parsed trame into the coalescing queue. The actual DB
+        # write happens in the batch writer thread (every _BATCH_INTERVAL).
+        # If a previous trame for the same (obj_type, ident) is still
+        # pending, it is overwritten — the most recent position wins, older
+        # positions for the same object within the same cycle are dropped.
+        with self._pending_lock:
+            self._pending[(obj_type, ident)] = {
+                "defaults": defaults,
+                "create_defaults": create_defaults,
+                "lat": lat, "lon": lon,
+                "speed": speed,
+                "altitude_ft": altitude_ft,
+                "altitude_m": altitude_m,
+            }
+        self._log(f"  [{obj_type:10s}] queued {name or ident} "
                   f"({lat:.4f}, {lon:.4f})")
 
-        if self.broadcast and _CHANNEL_LAYER is not None:
+    # ------------------------------------------------------------------------
+    def _batch_writer_loop(self):
+        """Drain the coalescing queue every _BATCH_INTERVAL and persist all
+        pending positions in a single SQLite transaction.
+
+        Why a single transaction: SQLite serialises commits with an fsync
+        each, so N separate writes cost N × fsync (~10 ms each on a typical
+        disk). One transaction with N updates costs one fsync regardless of
+        N. With 50 trames/sec spread across multiple modules, this is the
+        difference between saturating the lock and having spare capacity.
+        """
+        while not self._stop.wait(self._BATCH_INTERVAL):
+            # Swap the pending dict for an empty one under the queue lock,
+            # so the TCP threads can keep accepting new trames while we work.
+            with self._pending_lock:
+                if not self._pending:
+                    continue
+                batch = self._pending
+                self._pending = {}
+
+            # Each item is a dict of fields ready to feed to update_or_create.
+            broadcast_objs = []
+            new_tracks = []
             try:
-                async_to_sync(_CHANNEL_LAYER.group_send)(
-                    GROUP_NAME, {"type": "sdr.object", "object": obj.to_dict()},
-                )
-            except Exception as exc:  # never break TCP reception
-                self._log(self.style.ERROR(f"  WS broadcast failed: {exc}"))
+                with self._db_lock, transaction.atomic():
+                    for (obj_type, ident), item in batch.items():
+                        defaults = item["defaults"]
+                        create_defaults = item["create_defaults"]
+                        if create_defaults is not None:
+                            obj, created = SdrObject.objects.update_or_create(
+                                obj_type=obj_type, ident=ident,
+                                defaults=defaults,
+                                create_defaults=create_defaults,
+                            )
+                        else:
+                            obj, created = SdrObject.objects.update_or_create(
+                                obj_type=obj_type, ident=ident,
+                                defaults=defaults,
+                            )
+
+                        # Track point: only insert if the position actually
+                        # changed since the last recorded point. We keep an
+                        # in-memory cache of the last position per object so
+                        # we don't hit SQLite with a SELECT per ident.
+                        lat = item["lat"]; lon = item["lon"]
+                        cached = self._last_track_pos.get((obj_type, ident))
+                        if cached is None:
+                            # Cache miss: ask SQLite once, then trust the cache.
+                            cached = (SdrObjectTrack.objects
+                                      .filter(obj_type=obj_type, ident=ident)
+                                      .order_by("-timestamp")
+                                      .values_list("lat", "lon")
+                                      .first())
+                        if cached is None or cached[0] != lat or cached[1] != lon:
+                            track_alt_ft = item["altitude_ft"]
+                            if track_alt_ft is None and item["altitude_m"] is not None:
+                                track_alt_ft = int(round(item["altitude_m"] / 0.3048))
+                            new_tracks.append(SdrObjectTrack(
+                                obj_type=obj_type, ident=ident,
+                                lat=lat, lon=lon,
+                                speed=item["speed"], altitude_ft=track_alt_ft,
+                                timestamp=defaults["last_seen"],
+                            ))
+                            self._last_track_pos[(obj_type, ident)] = (lat, lon)
+
+                        broadcast_objs.append(obj.to_dict())
+
+                    # Tracks in one bulk_create — much cheaper than N
+                    # individual create() calls inside the same transaction.
+                    if new_tracks:
+                        SdrObjectTrack.objects.bulk_create(new_tracks)
+            except Exception as exc:
+                self._log(self.style.ERROR(
+                    f"  Batch write failed ({len(batch)} items): {exc}"))
+                continue
+
+            # WebSocket broadcast outside the DB lock. We still send one
+            # message per object (the client expects "object" events one by
+            # one); a future optimisation would be to bundle them, but each
+            # message is already small and the InMemoryChannelLayer is fast.
+            if self.broadcast and _CHANNEL_LAYER is not None and broadcast_objs:
+                for d in broadcast_objs:
+                    try:
+                        async_to_sync(_CHANNEL_LAYER.group_send)(
+                            GROUP_NAME,
+                            {"type": "sdr.object", "object": d},
+                        )
+                    except Exception as exc:
+                        self._log(self.style.ERROR(
+                            f"  WS broadcast failed: {exc}"))
 
     # --------------------------------------------------------------------- #
     def _purge_loop(self):
@@ -873,6 +1013,11 @@ class Command(BaseCommand):
                     obj_type=obj_type, last_seen__lt=cutoff))
                 for obj in stale:
                     pk = obj.pk
+                    # Drop the cached last-position too, otherwise the next
+                    # trame for this ident would see a stale cache entry and
+                    # miss the chance to insert the first track point of a
+                    # fresh observation.
+                    self._last_track_pos.pop((obj.obj_type, obj.ident), None)
                     obj.delete()
                     if self.broadcast and _CHANNEL_LAYER is not None:
                         try:

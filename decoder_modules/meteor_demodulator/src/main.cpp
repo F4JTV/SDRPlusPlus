@@ -13,16 +13,23 @@
 #include <meteor_demodulator_interface.h>
 #include <gui/widgets/folder_select.h>
 #include <gui/widgets/constellation_diagram.h>
+#include <utils/opengl_include_code.h>
 
 #include <fstream>
+#include <thread>
+#include <atomic>
+#include <vector>
+
+#include "lrpt/lrpt_decoder.h"
+#include "lrpt/stb_image_write.h"
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
 SDRPP_MOD_INFO{
     /* Name:            */ "meteor_demodulator",
-    /* Description:     */ "Meteor demodulator for SDR++",
-    /* Author:          */ "Ryzerth",
-    /* Version:         */ 0, 1, 0,
+    /* Description:     */ "Meteor demodulator + LRPT image decoder for SDR++",
+    /* Author:          */ "Ryzerth;F4JTV (LRPT decode, ported from SatDump)",
+    /* Version:         */ 0, 2, 0,
     /* Max instances    */ -1
 };
 
@@ -38,6 +45,44 @@ std::string genFileName(std::string prefix, std::string suffix) {
 
 #define INPUT_SAMPLE_RATE 150000
 
+// A growable RGBA OpenGL texture, lazily created in the render thread (where the
+// GL context is active) and recreated when the image dimensions change. This is
+// the directly-managed-texture pattern (avoids ImGui::ImageDisplay's fixed size).
+class GrowableTexture {
+public:
+    ~GrowableTexture() {
+        if (textureId) glDeleteTextures(1, &textureId);
+    }
+
+    // Upload an RGBA8 buffer (width*height*4). Call from the render thread.
+    void update(const uint8_t* rgba, int width, int height) {
+        if (!rgba || width <= 0 || height <= 0) return;
+        if (!created) {
+            glGenTextures(1, &textureId);
+            created = true;
+        }
+        glBindTexture(GL_TEXTURE_2D, textureId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        w = width; h = height;
+        valid = true;
+    }
+
+    bool isValid() const { return valid; }
+    GLuint id() const { return textureId; }
+    int width() const { return w; }
+    int height() const { return h; }
+
+private:
+    GLuint textureId = 0;
+    bool created = false, valid = false;
+    int w = 0, h = 0;
+};
+
 class MeteorDemodulatorModule : public ModuleManager::Instance {
 public:
     MeteorDemodulatorModule(std::string name) : folderSelect("%ROOT%/recordings") {
@@ -47,7 +92,6 @@ public:
 
         // Load config
         config.acquire();
-        // Note: this first one may not be needed but I'm paranoid
         if (!config.conf.contains(name)) {
             config.conf[name] = json({});
         }
@@ -60,6 +104,9 @@ public:
         if (config.conf[name].contains("oqpsk")) {
             oqpsk = config.conf[name]["oqpsk"];
         }
+        if (config.conf[name].contains("lrptDiff")) {
+            lrptDiff = config.conf[name]["lrptDiff"];
+        }
         config.release();
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
@@ -70,6 +117,8 @@ public:
         reshape.init(&symSinkStream, 1024, (72000 / 30) - 1024);
         symSink.init(&reshape.out, symSinkHandler, this);
         sink.init(&sinkStream, sinkHandler, this);
+
+        decoder = std::make_unique<LRPTDecoder>(lrptDiff);
 
         demod.start();
         split.start();
@@ -87,6 +136,7 @@ public:
             recording = false;
             recFile.close();
         }
+        stopFileDecode();
         demod.stop();
         split.stop();
         reshape.stop();
@@ -94,6 +144,7 @@ public:
         sink.stop();
         sigpath::vfoManager.deleteVFO(vfo);
         gui::menu.removeEntry(name);
+        delete[] writeBuffer;
     }
 
     void postInit() {}
@@ -180,6 +231,115 @@ private:
         if (!_this->folderSelect.pathIsValid() && _this->enabled) { style::endDisabled(); }
 
         if (!_this->enabled) { style::endDisabled(); }
+
+        // ---------------- LRPT image decoder ----------------
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextUnformatted("LRPT image decoder");
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox(CONCAT("Decode LRPT (live)##lrpt_live", _this->name), &_this->liveDecode)) {
+            // Nothing else needed; sinkHandler checks the flag.
+        }
+
+        if (ImGui::Checkbox(CONCAT("Differential decode##lrpt_diff", _this->name), &_this->lrptDiff)) {
+            if (_this->decoder) _this->decoder->setDiffDecode(_this->lrptDiff);
+            config.acquire();
+            config.conf[_this->name]["lrptDiff"] = _this->lrptDiff;
+            config.release(true);
+        }
+
+        // Status line
+        {
+            bool locked = _this->decoder ? _this->decoder->isLocked() : false;
+            float ber = _this->decoder ? _this->decoder->getBER() : 0.0f;
+            uint64_t cadus = _this->decoder ? _this->decoder->getCADUs() : 0;
+            uint64_t pkts = _this->decoder ? _this->decoder->getPackets() : 0;
+
+            ImGui::TextUnformatted("Sync:");
+            ImGui::SameLine();
+            if (locked) ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "LOCKED");
+            else ImGui::TextColored(ImVec4(0.8f, 0.3f, 0.3f, 1.0f), "no sync");
+            ImGui::SameLine();
+            ImGui::Text("| BER %.3f", ber);
+            ImGui::Text("CADUs: %llu   MSU-MR packets: %llu",
+                        (unsigned long long)cadus, (unsigned long long)pkts);
+        }
+
+        if (_this->fileDecoding) {
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "Decoding file... %d%%", (int)(_this->fileProgress * 100.0f));
+        }
+
+        // View selector
+        ImGui::SetNextItemWidth(menuWidth);
+        const char* viewItems = "Composite RGB\0Channel 1 (APID 64)\0Channel 2 (APID 65)\0Channel 3 (APID 66)\0Channel 4 (APID 67)\0Channel 5 (APID 68)\0Channel 6 (APID 69)\0";
+        ImGui::Combo(CONCAT("##lrpt_view", _this->name), &_this->viewMode, viewItems);
+
+        if (_this->viewMode == 0) {
+            ImGui::Text("R/G/B channels:");
+            ImGui::SetNextItemWidth(menuWidth / 3.0f - 4);
+            ImGui::InputInt(CONCAT("##lrpt_r", _this->name), &_this->compR, 0, 0);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(menuWidth / 3.0f - 4);
+            ImGui::InputInt(CONCAT("##lrpt_g", _this->name), &_this->compG, 0, 0);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(menuWidth / 3.0f - 4);
+            ImGui::InputInt(CONCAT("##lrpt_b", _this->name), &_this->compB, 0, 0);
+            _this->compR = std::clamp(_this->compR, 0, 5);
+            _this->compG = std::clamp(_this->compG, 0, 5);
+            _this->compB = std::clamp(_this->compB, 0, 5);
+        }
+
+        if (ImGui::Button(CONCAT("Refresh image##lrpt_refresh", _this->name), ImVec2(menuWidth, 0))) {
+            _this->rebuildImage();
+        }
+
+        // Auto-refresh roughly every 2 s while live decoding
+        if (_this->liveDecode) {
+            double now = ImGui::GetTime();
+            if (now - _this->lastRefresh > 2.0) {
+                _this->lastRefresh = now;
+                _this->rebuildImage();
+            }
+        }
+
+        // Image display
+        if (!_this->displayRGBA.empty() && _this->dispW > 0 && _this->dispH > 0) {
+            if (_this->texDirty) {
+                _this->texture.update(_this->displayRGBA.data(), _this->dispW, _this->dispH);
+                _this->texDirty = false;
+            }
+            if (_this->texture.isValid()) {
+                float aspect = (float)_this->dispH / (float)_this->dispW;
+                float dw = menuWidth;
+                float dh = dw * aspect;
+                ImGui::Image((ImTextureID)(intptr_t)_this->texture.id(), ImVec2(dw, dh));
+                ImGui::Text("Image: %d x %d", _this->dispW, _this->dispH);
+            }
+        }
+        else {
+            ImGui::TextDisabled("No image yet");
+        }
+
+        if (ImGui::Button(CONCAT("Save PNG##lrpt_save", _this->name), ImVec2(menuWidth, 0))) {
+            _this->savePNG();
+        }
+
+        if (ImGui::Button(CONCAT("Reset decoder##lrpt_reset", _this->name), ImVec2(menuWidth, 0))) {
+            if (_this->decoder) _this->decoder->reset();
+            _this->displayRGBA.clear();
+            _this->dispW = _this->dispH = 0;
+        }
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Offline decode (.s soft symbols):");
+        ImGui::SetNextItemWidth(menuWidth);
+        ImGui::InputText(CONCAT("##lrpt_file", _this->name), _this->filePath, sizeof(_this->filePath));
+        if (_this->fileDecoding) { style::beginDisabled(); }
+        if (ImGui::Button(CONCAT("Decode file##lrpt_decfile", _this->name), ImVec2(menuWidth, 0))) {
+            _this->startFileDecode(_this->filePath);
+        }
+        if (_this->fileDecoding) { style::endDisabled(); }
     }
 
     static void symSinkHandler(dsp::complex_t* data, int count, void* ctx) {
@@ -192,14 +352,136 @@ private:
 
     static void sinkHandler(dsp::complex_t* data, int count, void* ctx) {
         MeteorDemodulatorModule* _this = (MeteorDemodulatorModule*)ctx;
-        std::lock_guard<std::mutex> lck(_this->recMtx);
-        if (!_this->recording) { return; }
-        for (int i = 0; i < count; i++) {
-            _this->writeBuffer[(2 * i)] = std::clamp<int>(data[i].re * 84.0f, -127, 127);
-            _this->writeBuffer[(2 * i) + 1] = std::clamp<int>(data[i].im * 84.0f, -127, 127);
+
+        // Convert soft QPSK symbols to int8 I/Q (same scaling as the .s recorder)
+        if (_this->recording || _this->liveDecode) {
+            for (int i = 0; i < count; i++) {
+                _this->writeBuffer[(2 * i)] = std::clamp<int>(data[i].re * 84.0f, -127, 127);
+                _this->writeBuffer[(2 * i) + 1] = std::clamp<int>(data[i].im * 84.0f, -127, 127);
+            }
         }
-        _this->recFile.write((char*)_this->writeBuffer, count * 2);
-        _this->dataWritten += count * 2;
+
+        if (_this->liveDecode && _this->decoder) {
+            _this->decoder->pushSymbols(_this->writeBuffer, count * 2);
+        }
+
+        {
+            std::lock_guard<std::mutex> lck(_this->recMtx);
+            if (!_this->recording) { return; }
+            _this->recFile.write((char*)_this->writeBuffer, count * 2);
+            _this->dataWritten += count * 2;
+        }
+    }
+
+    void rebuildImage() {
+        if (!decoder) return;
+        if (viewMode == 0) {
+            std::vector<uint8_t> rgb;
+            int w = 0, h = 0;
+            if (decoder->getComposite(compR, compG, compB, rgb, w, h)) {
+                rgbaFromRGB(rgb, w, h);
+            }
+        }
+        else {
+            int ch = viewMode - 1;
+            meteorimg::SimpleImage img = decoder->getChannelImage(ch);
+            if (img.size() > 0) {
+                rgbaFromGray(img);
+            }
+        }
+    }
+
+    void rgbaFromGray(meteorimg::SimpleImage& img) {
+        int w = (int)img.width(), h = (int)img.height();
+        if (w <= 0 || h <= 0) return;
+        displayRGBA.assign((size_t)w * h * 4, 255);
+        const uint8_t* src = img.data();
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint8_t v = src[i];
+            displayRGBA[i * 4 + 0] = v;
+            displayRGBA[i * 4 + 1] = v;
+            displayRGBA[i * 4 + 2] = v;
+            displayRGBA[i * 4 + 3] = 255;
+        }
+        dispW = w; dispH = h; texDirty = true;
+    }
+
+    void rgbaFromRGB(std::vector<uint8_t>& rgb, int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        displayRGBA.assign((size_t)w * h * 4, 255);
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            displayRGBA[i * 4 + 0] = rgb[i * 3 + 0];
+            displayRGBA[i * 4 + 1] = rgb[i * 3 + 1];
+            displayRGBA[i * 4 + 2] = rgb[i * 3 + 2];
+            displayRGBA[i * 4 + 3] = 255;
+        }
+        dispW = w; dispH = h; texDirty = true;
+    }
+
+    void savePNG() {
+        rebuildImage();
+        if (displayRGBA.empty() || dispW <= 0 || dispH <= 0) {
+            flog::warn("LRPT: nothing to save yet");
+            return;
+        }
+        std::string base = folderSelect.pathIsValid() ? folderSelect.expandString(folderSelect.path) : ((std::string)core::args["root"] + "/recordings");
+        std::string suffix = (viewMode == 0) ? "_LRPT_RGB" : ("_LRPT_ch" + std::to_string(viewMode));
+        std::string filename = genFileName(base + "/meteor", suffix + ".png");
+        // Write RGB (drop alpha) for a compact image
+        std::vector<uint8_t> rgb((size_t)dispW * dispH * 3);
+        for (size_t i = 0; i < (size_t)dispW * dispH; i++) {
+            rgb[i * 3 + 0] = displayRGBA[i * 4 + 0];
+            rgb[i * 3 + 1] = displayRGBA[i * 4 + 1];
+            rgb[i * 3 + 2] = displayRGBA[i * 4 + 2];
+        }
+        if (stbi_write_png(filename.c_str(), dispW, dispH, 3, rgb.data(), dispW * 3)) {
+            flog::info("LRPT: saved '{0}'", filename);
+        }
+        else {
+            flog::error("LRPT: failed to save PNG");
+        }
+    }
+
+    void startFileDecode(const std::string& path) {
+        if (fileDecoding) return;
+        if (path.empty() || !std::filesystem::exists(path)) {
+            flog::error("LRPT: file does not exist: '{0}'", path);
+            return;
+        }
+        stopFileDecode();
+        if (decoder) decoder->reset();
+        fileProgress = 0.0f;
+        fileDecoding = true;
+        fileDecodeStop = false;
+        fileThread = std::thread(&MeteorDemodulatorModule::fileDecodeWorker, this, path);
+    }
+
+    void stopFileDecode() {
+        fileDecodeStop = true;
+        if (fileThread.joinable()) fileThread.join();
+        fileDecoding = false;
+    }
+
+    void fileDecodeWorker(std::string path) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) { fileDecoding = false; return; }
+        std::streamsize total = f.tellg();
+        f.seekg(0, std::ios::beg);
+        const size_t CHUNK = 65536; // int8 samples per read
+        std::vector<int8_t> buf(CHUNK);
+        std::streamsize done = 0;
+        while (!fileDecodeStop && f.good()) {
+            f.read((char*)buf.data(), CHUNK);
+            std::streamsize got = f.gcount();
+            if (got <= 0) break;
+            if (decoder) decoder->pushSymbols(buf.data(), (int)got);
+            done += got;
+            fileProgress = total > 0 ? (float)((double)done / (double)total) : 0.0f;
+        }
+        fileProgress = 1.0f;
+        // Build the final image (on the worker; texture upload happens in render thread)
+        rebuildImage();
+        fileDecoding = false;
     }
 
     void startRecording() {
@@ -258,10 +540,29 @@ private:
     bool brokenModulation = false;
     bool oqpsk = false;
     int8_t* writeBuffer;
+
+    // LRPT decode
+    std::unique_ptr<LRPTDecoder> decoder;
+    bool liveDecode = false;
+    bool lrptDiff = false;
+
+    int viewMode = 0; // 0 = composite, 1..6 = channels
+    int compR = 0, compG = 1, compB = 2;
+
+    std::vector<uint8_t> displayRGBA;
+    int dispW = 0, dispH = 0;
+    bool texDirty = false;
+    GrowableTexture texture;
+    double lastRefresh = 0.0;
+
+    char filePath[1024] = "";
+    std::thread fileThread;
+    std::atomic<bool> fileDecoding{false};
+    std::atomic<bool> fileDecodeStop{false};
+    std::atomic<float> fileProgress{0.0f};
 };
 
 MOD_EXPORT void _INIT_() {
-    // Create default recording directory
     std::string root = (std::string)core::args["root"];
     if (!std::filesystem::exists(root + "/recordings")) {
         flog::warn("Recordings directory does not exist, creating it");

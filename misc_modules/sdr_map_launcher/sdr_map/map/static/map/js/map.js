@@ -94,20 +94,21 @@
     "lrrp": L.layerGroup().addTo(map),
     "radiosonde": L.layerGroup().addTo(map),
     "TETRA": L.layerGroup().addTo(map),
+    "SARSAT": L.layerGroup().addTo(map),
   };
   const markers = new Map();        // id -> L.marker
   const objectsById = new Map();    // id -> data
   const histories = new Map();      // id -> [[lat,lon], ...] (trajet)
   const trails = new Map();         // id -> L.polyline (trace)
 
-  const CLASS = { "AIS": "t-AIS", "ADSB": "t-ADSB", "APRS": "t-APRS", "APRS Meteo": "t-METEO", "lrrp": "t-LRRP", "radiosonde": "t-SONDE", "TETRA": "t-TETRA" };
+  const CLASS = { "AIS": "t-AIS", "ADSB": "t-ADSB", "APRS": "t-APRS", "APRS Meteo": "t-METEO", "lrrp": "t-LRRP", "radiosonde": "t-SONDE", "TETRA": "t-TETRA", "SARSAT": "t-SARSAT" };
   // Libellé lisible affiché dans les popups (le champ "type" reste la clé).
-  const TYPE_LABEL = { "lrrp": "LRRP", "radiosonde": "SONDE", "TETRA": "TETRA" };
+  const TYPE_LABEL = { "lrrp": "LRRP", "radiosonde": "SONDE", "TETRA": "TETRA", "SARSAT": "SARSAT" };
   // Couleurs des traces (alignées sur le CSS par type).
   const TRAIL_COLOR = {
     "AIS": "#22d3ee", "ADSB": "#f6a609", "APRS": "#34d399",
     "APRS Meteo": "#a78bfa", "lrrp": "#f472b6", "radiosonde": "#facc15",
-    "TETRA": "#fb923c",
+    "TETRA": "#fb923c", "SARSAT": "#dc2626",
   };
   const MAX_TRAIL = 200;            // nombre max de positions conservées par objet
   let showTrails = true;            // piloté par la case « Afficher les traces »
@@ -200,6 +201,23 @@
     '<circle cx="14.5" cy="19.5" r="0.8" fill="rgba(7,11,18,0.85)"/>' +
     '</svg>';
 
+  // Cospas-Sarsat 406 MHz distress beacon: circle (filled with currentColor)
+  // crossed by 8 short radio-wave dashes (N, S, E, W + diagonals), with a
+  // bright white dot in the centre. Designed to read as "SOS / radio source"
+  // at a glance. Real beacons get a pulsing red; test transmissions get a
+  // steady amber (handled in CSS).
+  const SARSAT_SVG =
+    '<svg viewBox="0 0 32 32" width="22" height="22" fill="currentColor" ' +
+    'xmlns="http://www.w3.org/2000/svg">' +
+    '<circle cx="16" cy="16" r="13" fill="currentColor" ' +
+    'stroke="rgba(255,255,255,0.7)" stroke-width="1.5"/>' +
+    '<path d="M16 9 v3 M16 20 v3 M9 16 h3 M20 16 h3 ' +
+            'M11 11 l2 2 M21 21 l-2 -2 M11 21 l2 -2 M21 11 l-2 2" ' +
+            'stroke="rgba(255,255,255,0.95)" stroke-width="2" ' +
+            'stroke-linecap="round" fill="none"/>' +
+    '<circle cx="16" cy="16" r="2.5" fill="rgba(255,255,255,0.95)"/>' +
+    '</svg>';
+
   // Glyphes pour les types NON orientés (pas de cap).
   const GLYPH = {
     "APRS": "✚", "APRS Meteo": "☂", "lrrp": "⌖",
@@ -252,16 +270,26 @@
     if (o.type === "TETRA") {
       return `<span class="glyph tetra" style="${rot}">${TETRA_SVG}</span>`;
     }
+    if (o.type === "SARSAT") {
+      // Distress beacons don't move (or barely do): no rotation. Real
+      // beacons pulse, test beacons stay steady — handled by the
+      // `sarsat-test` class added to the parent .sdr-marker by makeIcon.
+      return `<span class="glyph sarsat">${SARSAT_SVG}</span>`;
+    }
     return `<span class="glyph" style="${rot}">${GLYPH[o.type] || "•"}</span>`;
   }
 
   function makeIcon(o) {
     const r = iconRotation(o);
     const label = o.name || o.ident || "";
+    // For SARSAT beacons in test mode, append a class so the CSS swaps to
+    // amber and disables the distress pulse animation. Real distress
+    // beacons keep the default red colour and pulse.
+    const extraCls = (o.type === "SARSAT" && o.sarsat_test) ? " sarsat-test" : "";
     return L.divIcon({
       className: "",
       iconSize: [24, 24], iconAnchor: [12, 12],
-      html: `<div class="sdr-marker ${CLASS[o.type]}">
+      html: `<div class="sdr-marker ${CLASS[o.type]}${extraCls}">
                ${glyphHtml(o, r)}
                <span class="label">${escapeHtml(label)}</span>
              </div>`,
@@ -310,15 +338,17 @@
       if (o.mmsi_label && o.mmsi_kind && o.mmsi_kind !== "ship") {
         grid += row("AIS type", o.mmsi_label);
       }
-      if (o.country_name || o.country_iso) {
-        const flag = flagHtml(o.country_iso);
-        const cc = o.country_iso ? ` (${o.country_iso})` : "";
-        const txt = `${flag}${o.country_name || o.country_iso}${cc}`;
-        // Country row: don't HTML-escape (we built the flag <img> ourselves)
-        grid += `<span class="k">Flag</span><span class="v">${txt}</span>`;
-      } else if (o.mid) {
-        grid += row("MID", o.mid);
-      }
+    }
+    // Country + flag: shared between AIS (derived from MMSI MID) and SARSAT
+    // (parsed from the beacon's country field). The flagHtml helper falls
+    // back to an emoji if the SVG can't be found.
+    if (o.country_name || o.country_iso) {
+      const flag = flagHtml(o.country_iso);
+      const cc = o.country_iso ? ` (${o.country_iso})` : "";
+      const txt = `${flag}${o.country_name || o.country_iso}${cc}`;
+      grid += `<span class="k">Flag</span><span class="v">${txt}</span>`;
+    } else if (o.mid) {
+      grid += row("MID", o.mid);
     }
     if (o.icao) grid += row("ICAO", o.icao);
     if (o.ssi)  grid += row("SSI",  o.ssi);
@@ -327,6 +357,31 @@
     // so the operator can judge how trustworthy the position is.
     if (o.type === "TETRA" && o.gps_acc_m != null) {
       grid += row("GPS accuracy", "±" + Math.round(o.gps_acc_m) + " m");
+    }
+    // Cospas-Sarsat beacon details. We've already parsed the `info` field
+    // on the server side, so render its components as proper rows here.
+    if (o.type === "SARSAT") {
+      grid += row("Hex ID", o.name);
+      if (o.sarsat_beacon) {
+        const t = o.sarsat_test ? " (TEST)" : "";
+        grid += row("Beacon", o.sarsat_beacon + t);
+      }
+      if (o.sarsat_protocol)  grid += row("Protocol", o.sarsat_protocol);
+      if (o.sarsat_aircraft)  grid += row("Aircraft", o.sarsat_aircraft);
+      if (o.sarsat_callsign)  grid += row("Callsign", o.sarsat_callsign);
+      if (o.sarsat_serial)    grid += row("Serial",   o.sarsat_serial);
+      if (o.sarsat_operator)  grid += row("Operator", o.sarsat_operator);
+      if (o.sarsat_src) {
+        grid += row("Position src",
+          o.sarsat_src === "external" ? "External GPS" : "Internal");
+      }
+      if (o.sarsat_homing121) {
+        grid += row("121.5 MHz", o.sarsat_homing121 === "yes" ? "✓ homing" : "—");
+      }
+      if (o.sarsat_bch1 || o.sarsat_bch2) {
+        const fmt = (b) => b === "ok" ? "✓" : (b === "err" ? "✗" : (b || "—"));
+        grid += row("BCH", fmt(o.sarsat_bch1) + " / " + fmt(o.sarsat_bch2));
+      }
     }
     if (o.type === "radiosonde") {
       if (o.altitude_m != null) grid += row("Altitude", Math.round(o.altitude_m) + " m");
@@ -350,7 +405,10 @@
     if (w.wind_dir != null) grid += row("Wind dir.", Math.round(w.wind_dir) + "°");
     if (w.pressure_hpa != null) grid += row("Pressure", w.pressure_hpa + " hPa");
     if (w.rain_mm != null) grid += row("Rain", w.rain_mm + " mm");
-    const info = o.info ? `<div class="popup-info">${escapeHtml(o.info)}</div>` : "";
+    // For SARSAT we already parsed `info` into structured rows above, so
+    // hide the raw "beacon=...;country=..." dump.
+    const showRawInfo = o.info && o.type !== "SARSAT";
+    const info = showRawInfo ? `<div class="popup-info">${escapeHtml(o.info)}</div>` : "";
     const ds = `data-type="${escapeHtml(o.type)}" data-ident="${escapeHtml(o.ident)}"`;
     const actions = `<div class="popup-actions">
         <button class="popup-btn" data-act="replay" ${ds}>▷ Replay</button>
@@ -462,7 +520,7 @@
   }
 
   function refreshCounts() {
-    const c = { "AIS": 0, "ADSB": 0, "APRS": 0, "APRS Meteo": 0, "lrrp": 0, "radiosonde": 0, "TETRA": 0 };
+    const c = { "AIS": 0, "ADSB": 0, "APRS": 0, "APRS Meteo": 0, "lrrp": 0, "radiosonde": 0, "TETRA": 0, "SARSAT": 0 };
     objectsById.forEach((o) => { if (o.type in c) c[o.type]++; });
     document.getElementById("count-AIS").textContent = c["AIS"];
     document.getElementById("count-ADSB").textContent = c["ADSB"];
@@ -471,6 +529,7 @@
     document.getElementById("count-LRRP").textContent = c["lrrp"];
     document.getElementById("count-SONDE").textContent = c["radiosonde"];
     document.getElementById("count-TETRA").textContent = c["TETRA"];
+    document.getElementById("count-SARSAT").textContent = c["SARSAT"];
   }
 
   // ----------------------------------------------------- Filtres (UI) ------
@@ -802,6 +861,7 @@
     "lrrp": "LRRP — DMR GPS",
     "radiosonde": "Radiosondes",
     "TETRA": "TETRA — handhelds",
+    "SARSAT": "Cospas-Sarsat beacons",
   };
   const retentionList = document.getElementById("retention-list");
   const retentionStatus = document.getElementById("retention-status");

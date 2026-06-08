@@ -24,13 +24,6 @@
     center: CENTER, zoom: ZOOM,
     zoomControl: false,          // recréé en bas à droite (voir plus bas)
     attributionControl: true,
-    // Satellites and any object that crosses the antimeridian (±180°
-    // longitude) would otherwise appear to "jump" to the opposite side of
-    // the world and disappear from the current view. With worldCopyJump,
-    // Leaflet seamlessly snaps the map's view back to the world copy that
-    // contains the overlays, so the marker stays visible regardless of
-    // which way the satellite is travelling.
-    worldCopyJump: true,
   });
 
   // --- Fonds de carte (plusieurs types) -----------------------------------
@@ -521,26 +514,60 @@
     objectsById.set(o.id, o);
     let m = markers.get(o.id);
     if (m) {
-      // Mise à jour « vivante » : on déplace le marqueur et on ajuste
-      // seulement la rotation/le libellé sur le DOM existant, sans recréer
-      // l'icône (sinon le marqueur clignote et ne « glisse » pas).
+      // Mise à jour « vivante » : on déplace le marqueur principal ET ses
+      // deux ghosts (copies adjacentes à ±360° de longitude), ainsi le
+      // marqueur reste visible peu importe la "copie" du monde affichée
+      // par l'utilisateur, et un objet qui traverse l'antiméridien apparaît
+      // immédiatement de l'autre côté de la carte au lieu de "disparaître".
       m.setLatLng([o.lat, o.lon]);
+      if (m._ghostL) m._ghostL.setLatLng([o.lat, o.lon - 360]);
+      if (m._ghostR) m._ghostR.setLatLng([o.lat, o.lon + 360]);
       m._sdrData = o;
       updateMarkerDom(m, o);
+      if (m._ghostL) updateMarkerDom(m._ghostL, o);
+      if (m._ghostR) updateMarkerDom(m._ghostR, o);
       // Re-applique la rotation au tick suivant : si Leaflet a (re)généré
       // l'élément pendant ce cycle (zoom/pan), le transform est repositionné.
-      requestAnimationFrame(() => updateMarkerDom(m, o));
+      requestAnimationFrame(() => {
+        updateMarkerDom(m, o);
+        if (m._ghostL) updateMarkerDom(m._ghostL, o);
+        if (m._ghostR) updateMarkerDom(m._ghostR, o);
+      });
       if (m.getPopup()) m.setPopupContent(popupHtml(o));
+      if (m._ghostL && m._ghostL.getPopup()) m._ghostL.setPopupContent(popupHtml(o));
+      if (m._ghostR && m._ghostR.getPopup()) m._ghostR.setPopupContent(popupHtml(o));
     } else {
       m = L.marker([o.lat, o.lon], {
         icon: makeIcon(o),
         // Transition CSS douce du déplacement (voir .leaflet-marker-icon).
         riseOnHover: true,
       }).bindPopup(popupHtml(o));
+      // Ghost copies at ±360° longitude: visually duplicate the marker on
+      // the world copies left and right of the main one. Without them, an
+      // object near the antimeridian (Bering Strait / Kamchatka-Alaska line)
+      // would appear to vanish when its longitude wraps from +179° to -179°
+      // because the marker stays at its literal coordinate, which falls
+      // outside the user's current viewport. With them, the satellite
+      // entering the antimeridian from the west keeps being rendered on the
+      // east side too (and vice-versa) — it visually "wraps around".
+      const ghostL = L.marker([o.lat, o.lon - 360], {
+        icon: makeIcon(o), riseOnHover: true,
+      }).bindPopup(popupHtml(o));
+      const ghostR = L.marker([o.lat, o.lon + 360], {
+        icon: makeIcon(o), riseOnHover: true,
+      }).bindPopup(popupHtml(o));
+      m._ghostL = ghostL;
+      m._ghostR = ghostR;
       m._sdrType = o.type;
       m._sdrData = o;
+      ghostL._sdrType = o.type;
+      ghostR._sdrType = o.type;
+      ghostL._sdrData = o;
+      ghostR._sdrData = o;
       markers.set(o.id, m);
       layers[o.type].addLayer(m);
+      layers[o.type].addLayer(ghostL);
+      layers[o.type].addLayer(ghostR);
     }
     // --- Historique des positions + trace de déplacement ---
     let h = histories.get(o.id);
@@ -591,36 +618,73 @@
     return segments;
   }
 
+  // Shift every point of a polyline path by a longitude offset (±360°).
+  // Used to draw "ghost" copies of a trail on adjacent world copies so the
+  // trace stays visually continuous around the antimeridian.
+  function shiftLon(points, delta) {
+    return points.map(([lat, lon]) => [lat, lon + delta]);
+  }
+
   // Build / refresh the polyline trace of an object. Multi-segment shape is
   // used so antimeridian crossings render as two disjoint pieces rather than
-  // one straight line slashing the whole map.
+  // one straight line slashing the whole map. Two ghost polylines mirror
+  // the trace on adjacent world copies (same logic as the marker ghosts),
+  // so the trace remains visible wherever the user is looking.
   function rebuildTrail(o) {
     const h = histories.get(o.id);
     let t = trails.get(o.id);
     if (!h || h.length < 2) {                 // pas (encore) de trajet
-      if (t) { layers[o.type].removeLayer(t); trails.delete(o.id); }
+      if (t) {
+        layers[o.type].removeLayer(t);
+        if (t._ghostL) layers[o.type].removeLayer(t._ghostL);
+        if (t._ghostR) layers[o.type].removeLayer(t._ghostR);
+        trails.delete(o.id);
+      }
       return;
     }
-    const segments = splitAntimeridian(h);
+    const segments  = splitAntimeridian(h);
+    const segmentsL = splitAntimeridian(shiftLon(h, -360));
+    const segmentsR = splitAntimeridian(shiftLon(h, +360));
     if (t) {
       t.setLatLngs(segments);
+      if (t._ghostL) t._ghostL.setLatLngs(segmentsL);
+      if (t._ghostR) t._ghostR.setLatLngs(segmentsR);
     } else {
-      t = L.polyline(segments, {
+      const style = {
         color: TRAIL_COLOR[o.type], weight: 2, opacity: 0.65,
         lineCap: "round", lineJoin: "round",
-      });
+      };
+      t = L.polyline(segments, style);
+      t._ghostL = L.polyline(segmentsL, style);
+      t._ghostR = L.polyline(segmentsR, style);
       trails.set(o.id, t);
       layers[o.type].addLayer(t);
-      t.bringToBack();                         // trace sous les marqueurs
+      layers[o.type].addLayer(t._ghostL);
+      layers[o.type].addLayer(t._ghostR);
+      t.bringToBack();
+      t._ghostL.bringToBack();
+      t._ghostR.bringToBack();
     }
   }
 
   function remove(id) {
     const m = markers.get(id);
     const type = m ? m._sdrType : (objectsById.get(id) || {}).type;
-    if (m) { layers[m._sdrType].removeLayer(m); markers.delete(id); }
+    if (m) {
+      layers[m._sdrType].removeLayer(m);
+      // Clean up the two ghost copies that mirror the marker on adjacent
+      // world copies (±360° longitude). Without this they'd stay on the map.
+      if (m._ghostL) layers[m._sdrType].removeLayer(m._ghostL);
+      if (m._ghostR) layers[m._sdrType].removeLayer(m._ghostR);
+      markers.delete(id);
+    }
     const t = trails.get(id);
-    if (t && type) { layers[type].removeLayer(t); trails.delete(id); }
+    if (t && type) {
+      layers[type].removeLayer(t);
+      if (t._ghostL) layers[type].removeLayer(t._ghostL);
+      if (t._ghostR) layers[type].removeLayer(t._ghostR);
+      trails.delete(id);
+    }
     histories.delete(id);
     objectsById.delete(id);
     refreshCounts();

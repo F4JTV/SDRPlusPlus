@@ -9,8 +9,8 @@ enum VfoMode {
     VFO_MODE_NFM = 2
 };
 
-// Common interface for every FLDIGI mode decoder (BPSK first, then QPSK,
-// RTTY, MFSK, ... can be added by implementing this interface).
+// Common interface for every FLDIGI mode decoder (BPSK today; RTTY, MFSK,
+// etc. can be added by implementing this interface).
 class Decoder {
 public:
     virtual ~Decoder() {}

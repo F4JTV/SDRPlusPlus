@@ -10,12 +10,10 @@
 
 #include "decoder.h"
 #include "psk/decoder.h"
-#include "psk/qpsk_decoder.h"
-#include "psk/psk8_decoder.h"
 
 SDRPP_MOD_INFO{
     /* Name:            */ "psk_decoder",
-    /* Description:     */ "PSK family decoder (BPSK / QPSK / 8PSK, FLDIGI compatible)",
+    /* Description:     */ "BPSK decoder (PSK31/63/125/250/500/1000, PSK63F, FLDIGI compatible)",
     /* Author:          */ "F4JTV",
     /* Version:         */ 0, 4, 0,
     /* Max instances    */ -1
@@ -23,10 +21,17 @@ SDRPP_MOD_INFO{
 
 ConfigManager config;
 
-// Modes are grouped into three contiguous ranges:
-//   [BPSK31  .. BPSK1000]   -> BPSKDecoder, idx = mode - BPSK31
-//   [QPSK31  .. QPSK500]    -> QPSKDecoder, idx = mode - QPSK31
-//   [PSK8_125 .. PSK8_1000] -> PSK8Decoder, idx = mode - PSK8_125
+// All BPSK modes are dispatched to a single BPSKDecoder with the mode index
+// passed through as a profile selector (idx = mode - BPSK31). BPSK63F is in
+// the BPSK range because it is bit-by-bit a BPSK transmission - the FEC and
+// MFSK-Varicode layers live inside the decoder itself.
+//
+// QPSK and 8PSK modes were removed at the operator's request: they are
+// fragile in real-world conditions (small angular separation between
+// constellation points, no inherent FEC for 8PSK plain, demanding carrier
+// recovery requirements) and produced unreliable output on the test signals
+// we had on hand. Keeping a smaller, robust feature set is better than
+// shipping modes that mislead users about what they decoded.
 enum FldigiMode {
     FLDIGI_MODE_INVALID = -1,
     FLDIGI_MODE_BPSK31   = 0,
@@ -35,26 +40,11 @@ enum FldigiMode {
     FLDIGI_MODE_BPSK125,
     FLDIGI_MODE_BPSK250,
     FLDIGI_MODE_BPSK500,
-    FLDIGI_MODE_BPSK1000,
-    FLDIGI_MODE_QPSK31,
-    FLDIGI_MODE_QPSK63,
-    FLDIGI_MODE_QPSK125,
-    FLDIGI_MODE_QPSK250,
-    FLDIGI_MODE_QPSK500,
-    FLDIGI_MODE_PSK8_125,
-    FLDIGI_MODE_PSK8_250,
-    FLDIGI_MODE_PSK8_500,
-    FLDIGI_MODE_PSK8_1000
+    FLDIGI_MODE_BPSK1000
 };
 
 static inline bool isBPSKMode(FldigiMode m) {
     return m >= FLDIGI_MODE_BPSK31 && m <= FLDIGI_MODE_BPSK1000;
-}
-static inline bool isQPSKMode(FldigiMode m) {
-    return m >= FLDIGI_MODE_QPSK31 && m <= FLDIGI_MODE_QPSK500;
-}
-static inline bool isPSK8Mode(FldigiMode m) {
-    return m >= FLDIGI_MODE_PSK8_125 && m <= FLDIGI_MODE_PSK8_1000;
 }
 
 class FldigiDecoderModule : public ModuleManager::Instance {
@@ -70,15 +60,6 @@ public:
         fldigiModes.define("BPSK250",  FLDIGI_MODE_BPSK250);
         fldigiModes.define("BPSK500",  FLDIGI_MODE_BPSK500);
         fldigiModes.define("BPSK1000", FLDIGI_MODE_BPSK1000);
-        fldigiModes.define("QPSK31",   FLDIGI_MODE_QPSK31);
-        fldigiModes.define("QPSK63",   FLDIGI_MODE_QPSK63);
-        fldigiModes.define("QPSK125",  FLDIGI_MODE_QPSK125);
-        fldigiModes.define("QPSK250",  FLDIGI_MODE_QPSK250);
-        fldigiModes.define("QPSK500",  FLDIGI_MODE_QPSK500);
-        fldigiModes.define("8PSK125",  FLDIGI_MODE_PSK8_125);
-        fldigiModes.define("8PSK250",  FLDIGI_MODE_PSK8_250);
-        fldigiModes.define("8PSK500",  FLDIGI_MODE_PSK8_500);
-        fldigiModes.define("8PSK1000", FLDIGI_MODE_PSK8_1000);
         vfoModes.define("USB", VFO_MODE_USB);
         vfoModes.define("LSB", VFO_MODE_LSB);
         vfoModes.define("NFM", VFO_MODE_NFM);
@@ -178,14 +159,6 @@ private:
         if (isBPSKMode(newMode)) {
             int idx = (int)newMode - (int)FLDIGI_MODE_BPSK31;
             decoder = std::make_unique<BPSKDecoder>(name, vfo, idx);
-        }
-        else if (isQPSKMode(newMode)) {
-            int idx = (int)newMode - (int)FLDIGI_MODE_QPSK31;
-            decoder = std::make_unique<QPSKDecoder>(name, vfo, idx);
-        }
-        else if (isPSK8Mode(newMode)) {
-            int idx = (int)newMode - (int)FLDIGI_MODE_PSK8_125;
-            decoder = std::make_unique<PSK8Decoder>(name, vfo, idx);
         }
         else {
             flog::error("PSK: mode {} not in any handled range", (int)newMode);

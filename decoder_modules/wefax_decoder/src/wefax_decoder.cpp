@@ -50,6 +50,12 @@ namespace wefax {
         manualSlantPpm        = 0.0;
         hShiftPixels          = 0;
         medianFilter          = false;
+
+        specMag.assign(SPEC_BINS, 0.0f);
+        specAccum.assign(SPEC_BINS, 0.0f);
+        specCount             = 0;
+        specWindow            = (int)(0.08 * sampleRate);  // ~80 ms
+        if (specWindow < 1) specWindow = 1;
     }
 
     WEFAXDecoder::~WEFAXDecoder() {}
@@ -70,6 +76,9 @@ namespace wefax {
         expectedPulseWidth = std::max(1, (int)std::round(0.05 * samplesPerLineNominal));
         expectedSyncOffsetInCycle = expectedPulseWidth / 2;
         calibratedSamplesPerCycle = (double)samplesPerLineNominal;
+
+        specWindow = (int)(0.08 * sampleRate);   // band-view window, ~80 ms
+        if (specWindow < 1) specWindow = 1;
 
         // Pre-size the image (RGB), height capped to MAX_LINES.
         std::lock_guard<std::mutex> lck(imageMutex);
@@ -201,6 +210,9 @@ namespace wefax {
             float f = freqHz[i];
             // Smooth frequency for the UI readout.
             lastAvgFreq += 0.001f * (f - lastAvgFreq);
+
+            // Band-view histogram (runs in every state, for AF alignment).
+            accumulateSpectrum(f);
 
             if (state == State::IDLE) {
                 if (autoStart) runAptDetectors(f);
@@ -605,6 +617,39 @@ namespace wefax {
                 imageBuffer[o] = imageBuffer[o + 1] = imageBuffer[o + 2] = g;
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Band-view histogram of the instantaneous frequency. Light: one bin
+    // increment per sample, normalized + smoothed once per window.
+    // ------------------------------------------------------------------
+    void WEFAXDecoder::accumulateSpectrum(float f) {
+        if (f >= BAND_FLO && f < BAND_FHI) {
+            int b = (int)((f - BAND_FLO) / (BAND_FHI - BAND_FLO) * SPEC_BINS);
+            if (b >= 0 && b < SPEC_BINS) specAccum[b] += 1.0f;
+        }
+        if (++specCount >= specWindow) {
+            // Exponential moving average of the raw per-window counts. Keeping
+            // raw magnitudes (normalizing only at read time) preserves the true
+            // relative energy between bins and avoids the bias a per-window
+            // max-normalize introduces for sweeping signals.
+            std::lock_guard<std::mutex> lck(specMtx);
+            for (int i = 0; i < SPEC_BINS; i++) {
+                specMag[i] = 0.8f * specMag[i] + 0.2f * specAccum[i];
+                specAccum[i] = 0.0f;
+            }
+            specCount = 0;
+        }
+    }
+
+    int WEFAXDecoder::getBandSpectrum(float* out, int n) const {
+        if (!out || n <= 0) return 0;
+        int c = (n < SPEC_BINS) ? n : SPEC_BINS;
+        std::lock_guard<std::mutex> lck(specMtx);
+        float mx = 1e-6f;
+        for (int i = 0; i < SPEC_BINS; i++) if (specMag[i] > mx) mx = specMag[i];
+        for (int i = 0; i < c; i++) out[i] = specMag[i] / mx;   // 0..1 at display
+        return c;
     }
 
 } // namespace wefax

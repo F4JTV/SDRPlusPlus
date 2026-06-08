@@ -84,6 +84,20 @@ namespace wefax {
         const uint8_t* getImageRGB() const { return imageBuffer.data(); }
         std::mutex&    getImageMutex()     { return imageMutex; }
 
+        // ---- Band view (instantaneous-frequency distribution) ----------
+        // A light, smoothed histogram of the incoming instantaneous frequency
+        // over [BAND_FLO, BAND_FHI]. It is computed on the SAME stream the
+        // decoder thresholds (so it is consistent with the black/center/white
+        // references regardless of demod mode), letting the GUI show where the
+        // demodulated energy sits for AF / audio-center alignment.
+        static constexpr float BAND_FLO  = 1000.0f;
+        static constexpr float BAND_FHI  = 2800.0f;
+        static constexpr int   SPEC_BINS = 160;
+        // Copies up to n smoothed bins (0..1) into out; returns count copied.
+        int   getBandSpectrum(float* out, int n) const;
+        float getBandFlo() const { return BAND_FLO; }
+        float getBandFhi() const { return BAND_FHI; }
+
         // ---- Manual controls -------------------------------------------
         // Begin reception immediately at the current LPM/IOC (bypasses the
         // APT start tone). Anchors a fresh raw buffer at the current sample.
@@ -144,6 +158,10 @@ namespace wefax {
         void renderAll();
         void renderLineRange(int firstLine, int lastLine);
         void applyMedianFilter();
+
+        // Accumulate one instantaneous-frequency sample into the band-view
+        // histogram (called for every incoming sample, in any state).
+        void accumulateSpectrum(float f);
 
         // Map an instantaneous frequency (Hz) to a 0..255 gray value.
         static inline uint8_t freqToGray(float freq) {
@@ -222,6 +240,13 @@ namespace wefax {
         std::mutex           imageMutex;
 
         LineCallback lineCallback;
+
+        // ---- Band-view histogram (smoothed) ----
+        std::vector<float> specMag;      // smoothed, normalized 0..1
+        std::vector<float> specAccum;    // current accumulation window
+        int                specCount;    // samples accumulated so far
+        int                specWindow;   // window length (samples)
+        mutable std::mutex specMtx;
     };
 
 } // namespace wefax

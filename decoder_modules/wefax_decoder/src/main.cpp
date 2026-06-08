@@ -50,7 +50,7 @@ SDRPP_MOD_INFO{
     /* Name:            */ "wefax_decoder",
     /* Description:     */ "WEFAX / HF Radiofax Decoder (auto-slant)",
     /* Author:          */ "WEFAX Decoder Contributors",
-    /* Version:         */ 0, 1, 0,
+    /* Version:         */ 0, 1, 1,
     /* Max instances    */ -1
 };
 
@@ -451,15 +451,89 @@ private:
             config.release(true);
         }
 
-        // ---- Audio center ----
+        // ---- Band view: smoothed histogram of the demodulated instantaneous
+        //      frequency, with the fixed WEFAX references (black 1500, center
+        //      1900, white 2300). Tune the audio-center so the signal energy
+        //      sits between the black and white markers. Click/drag to set it.
+        //      Same visual approach as the RTTY / PSK / MFSK modules. ----
         DemodMode demod = _this->demodList.value(_this->demodId);
         bool isNFM = (demod == DemodMode::NFM);
+        float acMin = isNFM ? 1500.0f : 1100.0f;
+        float acMax = isNFM ? 2300.0f : 1700.0f;
+        {
+            static float spec[wefax::WEFAXDecoder::SPEC_BINS];
+            int nb = _this->decoder.getBandSpectrum(spec, wefax::WEFAXDecoder::SPEC_BINS);
+            float flo = _this->decoder.getBandFlo();
+            float fhi = _this->decoder.getBandFhi();
+
+            float w = ImGui::GetContentRegionAvail().x;
+            float h = 58.0f;
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImU32 cBg     = IM_COL32(20, 22, 28, 255);
+            ImU32 cBar    = IM_COL32(90, 160, 230, 255);
+            ImU32 cBand   = IM_COL32(90, 160, 230, 45);
+            ImU32 cBlack  = IM_COL32(80, 80, 90, 255);
+            ImU32 cWhite  = IM_COL32(230, 230, 235, 255);
+            ImU32 cCenter = IM_COL32(250, 200, 80, 255);
+            dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), cBg, 3.0f);
+
+            auto f2x = [&](float f) {
+                return p0.x + w * ((f - flo) / (fhi - flo));
+            };
+
+            // Shaded band = expected signal footprint (black..white).
+            dl->AddRectFilled(ImVec2(f2x(wefax::WEFAX_BLACK_HZ), p0.y),
+                              ImVec2(f2x(wefax::WEFAX_WHITE_HZ), p0.y + h), cBand);
+
+            // Spectrum bars.
+            if (nb > 0) {
+                float bw = w / (float)nb;
+                for (int i = 0; i < nb; i++) {
+                    float v = spec[i]; if (v < 0) v = 0; if (v > 1) v = 1;
+                    float bh = v * (h - 4.0f);
+                    float bx = p0.x + i * bw;
+                    dl->AddRectFilled(ImVec2(bx, p0.y + h - bh),
+                                      ImVec2(bx + bw + 0.5f, p0.y + h), cBar);
+                }
+            }
+
+            // Markers: black / center / white.
+            dl->AddLine(ImVec2(f2x(wefax::WEFAX_BLACK_HZ), p0.y),
+                        ImVec2(f2x(wefax::WEFAX_BLACK_HZ), p0.y + h), cBlack, 1.5f);
+            dl->AddLine(ImVec2(f2x(wefax::WEFAX_WHITE_HZ), p0.y),
+                        ImVec2(f2x(wefax::WEFAX_WHITE_HZ), p0.y + h), cWhite, 1.5f);
+            dl->AddLine(ImVec2(f2x(wefax::WEFAX_CENTER_HZ), p0.y),
+                        ImVec2(f2x(wefax::WEFAX_CENTER_HZ), p0.y + h), cCenter, 2.0f);
+
+            // Interaction: click/drag moves the clicked frequency onto the
+            // center marker by adjusting the audio-center.
+            ImGui::InvisibleButton(("##wefax_band_" + _this->name).c_str(), ImVec2(w, h));
+            if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                float mx = ImGui::GetIO().MousePos.x;
+                float frac = (mx - p0.x) / w; if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                float fClick = flo + frac * (fhi - flo);
+                double newAC = _this->audioCenter + (wefax::WEFAX_CENTER_HZ - fClick);
+                if (newAC < acMin) newAC = acMin;
+                if (newAC > acMax) newAC = acMax;
+                if (std::abs(newAC - _this->audioCenter) > 0.5) {
+                    _this->audioCenter = newAC;
+                    if (isNFM) _this->audioCenterNFM = newAC; else _this->audioCenterSSB = newAC;
+                    if (isNFM && _this->xlator)
+                        _this->xlator->setOffset(-_this->audioCenter, _this->chainSampleRate);
+                    config.acquire();
+                    if (isNFM) config.conf[_this->name]["audioCenterNFM"] = _this->audioCenterNFM;
+                    else       config.conf[_this->name]["audioCenterSSB"] = _this->audioCenterSSB;
+                    config.release(true);
+                }
+            }
+        }
+
+        // ---- Audio center ----
         const char* acLabel = isNFM ? "Audio ctr (Hz)" : "Carrier ofs (Hz)";
         ImGui::LeftLabel(acLabel);
         ImGui::FillWidth();
         float ac = (float)_this->audioCenter;
-        float acMin = isNFM ? 1500.0f : 1100.0f;
-        float acMax = isNFM ? 2300.0f : 1700.0f;
         if (ImGui::SliderFloat(("##wefax_ac_" + _this->name).c_str(),
                                 &ac, acMin, acMax, "%.0f")) {
             _this->audioCenter = ac;
@@ -472,8 +546,8 @@ private:
             config.release(true);
         }
         if (isNFM)                          ImGui::TextDisabled("FM carrier in middle of VFO");
-        else if (demod == DemodMode::USB)   ImGui::TextDisabled("Click LEFT edge of marker on carrier");
-        else                                ImGui::TextDisabled("Click RIGHT edge of marker on carrier");
+        else if (demod == DemodMode::USB)   ImGui::TextDisabled("Tune so energy sits black..white");
+        else                                ImGui::TextDisabled("Tune so energy sits black..white");
 
         // ---- Status ----
         ImGui::Separator();

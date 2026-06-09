@@ -50,7 +50,7 @@ SDRPP_MOD_INFO{
     /* Name:            */ "wefax_decoder",
     /* Description:     */ "WEFAX / HF Radiofax Decoder (auto-slant)",
     /* Author:          */ "WEFAX Decoder Contributors",
-    /* Version:         */ 0, 1, 1,
+    /* Version:         */ 0, 1, 2,
     /* Max instances    */ -1
 };
 
@@ -135,6 +135,8 @@ public:
         bool medianI     = config.conf[name].value("median", false);
         manualSlantPpm   = config.conf[name].value("manualSlantPpm", 0.0);
         hShiftPixels     = config.conf[name].value("hShift", 0);
+        bool slantLearnedI = config.conf[name].value("slantLearned", false);
+        double learnedPpmI = config.conf[name].value("learnedSlantPpm", 0.0);
         config.release(true);
 
         decoder.setAutoStart(autoStartI);
@@ -143,6 +145,7 @@ public:
         decoder.setMedianFilterEnabled(medianI);
         decoder.setManualSlantPpm(manualSlantPpm);
         decoder.setHShiftPixels(hShiftPixels);
+        if (slantLearnedI) { decoder.setLearnedSlantPpm(learnedPpmI); lastSavedLearnedPpm = learnedPpmI; }
 
         audioCenter = (demodList.value(demodId) == DemodMode::NFM)
                         ? audioCenterNFM : audioCenterSSB;
@@ -689,6 +692,32 @@ private:
             config.release(true);
         }
 
+        // ---- Learned slant (clock error) ----
+        // Persist the learned ppm whenever a confident lock updates it. The
+        // hardware clock error is constant, so this carries across receptions
+        // and sessions, helping when a fax is tuned in mid-transmission (no
+        // phasing preamble to lock on).
+        if (_this->decoder.hasLearnedSlant()) {
+            double lp = _this->decoder.getLearnedSlantPpm();
+            if (std::abs(lp - _this->lastSavedLearnedPpm) > 0.5) {
+                _this->lastSavedLearnedPpm = lp;
+                config.acquire();
+                config.conf[_this->name]["slantLearned"]    = true;
+                config.conf[_this->name]["learnedSlantPpm"] = lp;
+                config.release(true);
+            }
+            ImGui::TextDisabled("Learned slant: %.0f ppm", lp);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(("Reset##wefax_lrst_" + _this->name).c_str())) {
+                _this->decoder.clearLearnedSlant();
+                _this->lastSavedLearnedPpm = 0.0;
+                config.acquire();
+                config.conf[_this->name]["slantLearned"]    = false;
+                config.conf[_this->name]["learnedSlantPpm"] = 0.0;
+                config.release(true);
+            }
+        }
+
         // ---- Manual trims (used mainly when auto-slant is off) ----
         ImGui::LeftLabel("Slant (ppm)");
         ImGui::FillWidth();
@@ -759,6 +788,7 @@ private:
     double  audioCenterNFM = DEFAULT_AUDIO_CENTER_NFM;
     double  manualSlantPpm = 0.0;
     int     hShiftPixels = 0;
+    double  lastSavedLearnedPpm = 0.0;
 
     GLuint      texture = 0;
     int         texWidth = 0;

@@ -30,6 +30,13 @@ namespace wefax {
     // Hard cap on image height (lines). A 120 LPM chart of ~16 minutes.
     constexpr int   WEFAX_MAX_LINES  = 2000;
 
+    // Slant-calibration quality gate (in samples of phasing-pulse residual).
+    // A clean phasing preamble yields an RMS residual of only a few to ~20
+    // samples; spurious pulses from image white content yield hundreds to
+    // thousands. We refuse to APPLY or LOCK a fit whose residual exceeds this,
+    // so auto-slant never corrupts the image when there is no real phasing.
+    constexpr double WEFAX_CALIB_RMS_MAX = 60.0;
+
     // Index Of Cooperation -> pixels per scan line = round(IOC * pi).
     inline int iocToWidth(int ioc) {
         return (int)(ioc * 3.14159265358979323846 + 0.5);
@@ -98,6 +105,9 @@ namespace wefax {
         float getBandFlo() const { return BAND_FLO; }
         float getBandFhi() const { return BAND_FHI; }
 
+        // Debug/inspection: the line period (samples) currently used to render.
+        double getEffectiveLinePeriod() const { return effectiveLinePeriod(); }
+
         // ---- Manual controls -------------------------------------------
         // Begin reception immediately at the current LPM/IOC (bypasses the
         // APT start tone). Anchors a fresh raw buffer at the current sample.
@@ -121,6 +131,19 @@ namespace wefax {
         // Manual slant trim in ppm (only used when auto-slant is OFF).
         void  setManualSlantPpm(double ppm) { manualSlantPpm = ppm; reRenderRequested = true; }
         double getManualSlantPpm() const    { return manualSlantPpm; }
+
+        // Learned slant (ppm): set from the last CONFIDENT auto-slant lock.
+        // The hardware clock error is constant, so this is reused as a fallback
+        // when a reception is tuned in mid-fax (no phasing preamble to lock on).
+        // The host persists it across sessions.
+        double getLearnedSlantPpm() const   { return learnedSlantPpm; }
+        bool   hasLearnedSlant() const      { return slantLearned; }
+        void   setLearnedSlantPpm(double ppm) {
+            learnedSlantPpm = ppm; slantLearned = true; reRenderRequested = true;
+        }
+        void   clearLearnedSlant() {
+            learnedSlantPpm = 0.0; slantLearned = false; reRenderRequested = true;
+        }
 
         // Manual horizontal alignment, in pixels (wraps the line start).
         void setHShiftPixels(int px) { hShiftPixels = px; reRenderRequested = true; }
@@ -231,9 +254,10 @@ namespace wefax {
         // ---- Feature flags ----
         bool   autoSlant;
         bool   ransacEnabled;
-        double manualSlantPpm;
-        int    hShiftPixels;
+        double manualSlantPpm;        int    hShiftPixels;
         bool   medianFilter;
+        double learnedSlantPpm;       // ppm from the last confident lock
+        bool   slantLearned;          // a confident lock has been seen
 
         // ---- Image buffer (RGB; gray replicated to R=G=B) ----
         std::vector<uint8_t> imageBuffer;   // width * MAX_LINES * 3

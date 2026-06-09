@@ -50,6 +50,8 @@ namespace wefax {
         manualSlantPpm        = 0.0;
         hShiftPixels          = 0;
         medianFilter          = false;
+        learnedSlantPpm       = 0.0;
+        slantLearned          = false;
 
         specMag.assign(SPEC_BINS, 0.0f);
         specAccum.assign(SPEC_BINS, 0.0f);
@@ -191,12 +193,26 @@ namespace wefax {
     }
 
     double WEFAXDecoder::effectiveLinePeriod() const {
-        if (autoSlant && calibrationValid) return calibratedSamplesPerCycle;
+        if (autoSlant) {
+            // A confident lock is the best estimate.
+            if (calibrationLocked) return calibratedSamplesPerCycle;
+            // Otherwise prefer the learned clock error (from a previous lock,
+            // constant per device) over a shaky live fit that may have latched
+            // onto image content rather than a real phasing preamble.
+            if (slantLearned)
+                return (double)samplesPerLineNominal * (1.0 + learnedSlantPpm * 1e-6);
+            // No learned value yet: use the best-effort gated live fit.
+            if (calibrationValid) return calibratedSamplesPerCycle;
+        }
         return (double)samplesPerLineNominal * (1.0 + manualSlantPpm * 1e-6);
     }
 
     double WEFAXDecoder::effectiveLineOrigin() const {
-        if (autoSlant && calibrationValid) {
+        // Use the regressed phasing offset only when we are actually rendering
+        // with the live calibrated period (locked, or a live fit with no learned
+        // fallback). When falling back to the learned ppm or manual, the phasing
+        // position is unknown, so start at 0 (the H-shift trim covers offset).
+        if (autoSlant && (calibrationLocked || (calibrationValid && !slantLearned))) {
             return calibratedFirstSyncOffset - (double)expectedSyncOffsetInCycle;
         }
         return 0.0;
@@ -245,20 +261,29 @@ namespace wefax {
                 nextCalibrationAt = (int)syncPositions.size() + 2;
                 if (updateCalibration()) {
                     reRenderRequested = true;
-                    // Lock once stable over enough pulses.
-                    if (syncPositions.size() >= 8) {
+                    // Lock once stable over enough pulses AND the fit quality is
+                    // good (low residual). updateCalibration() already rejected
+                    // high-residual fits, but we double-check here before the
+                    // permanent lock so we never freeze a marginal solution.
+                    bool goodQuality = (syncRmsResidual >= 0.0f &&
+                                        syncRmsResidual < WEFAX_CALIB_RMS_MAX);
+                    if (syncPositions.size() >= 8 && goodQuality) {
                         double rel = (lockedCycleValue > 0.0)
                             ? std::abs(calibratedSamplesPerCycle - lockedCycleValue) / lockedCycleValue
                             : 1.0;
-                        if (rel < 0.0005) {
-                            if (++stableCalibCount >= 2) {
-                                calibrationLocked = true;
-                                flog::info("[WEFAX] Slant calibration LOCKED: {0} samp/line (nominal {1}), jitter {2}",
-                                           (int)calibratedSamplesPerCycle, samplesPerLineNominal,
-                                           syncRmsResidual);
-                            }
-                        } else {
-                            stableCalibCount = 0;
+                        // Lock when two successive fits agree closely, or once we
+                        // have plenty of consistent pulses (clean phasing).
+                        bool stableEnough = (rel < 0.0005 && ++stableCalibCount >= 2);
+                        bool plentyPulses = (syncPositions.size() >= 14);
+                        if (rel >= 0.0005) stableCalibCount = 0;
+                        if (stableEnough || plentyPulses) {
+                            calibrationLocked = true;
+                            learnedSlantPpm = (calibratedSamplesPerCycle /
+                                               (double)samplesPerLineNominal - 1.0) * 1e6;
+                            slantLearned = true;
+                            flog::info("[WEFAX] Slant LOCKED: {0} samp/line (nominal {1}), jitter {2}, learned {3} ppm",
+                                       (int)calibratedSamplesPerCycle, samplesPerLineNominal,
+                                       syncRmsResidual, (int)learnedSlantPpm);
                         }
                         lockedCycleValue = calibratedSamplesPerCycle;
                     }
@@ -435,6 +460,14 @@ namespace wefax {
         }
         syncRmsResidual = (cnt > 0) ? (float)std::sqrt(sumR2 / cnt) : -1.0f;
 
+        // Quality gate: a real phasing preamble gives a small residual; pulses
+        // picked up from image white content give a huge one. Refuse to apply
+        // a low-quality fit so auto-slant never corrupts the image.
+        if (syncRmsResidual < 0.0f || syncRmsResidual > WEFAX_CALIB_RMS_MAX) {
+            calibrationValid = false;
+            return false;
+        }
+
         calibratedSamplesPerCycle = a;
         calibratedFirstSyncOffset = b;
         calibrationValid = true;
@@ -521,6 +554,10 @@ namespace wefax {
             if (std::abs(r) <= INLIER_TOL) { sumR2 += r * r; cnt++; }
         }
         syncRmsResidual = (cnt > 0) ? (float)std::sqrt(sumR2 / cnt) : -1.0f;
+        if (syncRmsResidual < 0.0f || syncRmsResidual > WEFAX_CALIB_RMS_MAX) {
+            calibrationValid = false;
+            return false;
+        }
         return true;
     }
 

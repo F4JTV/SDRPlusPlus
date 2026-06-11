@@ -29,7 +29,7 @@ SDRPP_MOD_INFO{
     /* Name:            */ "meteor_demodulator",
     /* Description:     */ "Meteor demodulator + LRPT image decoder for SDR++",
     /* Author:          */ "Ryzerth;F4JTV (LRPT decode, ported from SatDump)",
-    /* Version:         */ 0, 2, 0,
+    /* Version:         */ 0, 3, 0,
     /* Max instances    */ -1
 };
 
@@ -107,6 +107,9 @@ public:
         if (config.conf[name].contains("lrptDiff")) {
             lrptDiff = config.conf[name]["lrptDiff"];
         }
+        if (config.conf[name].contains("lrptModeM2x")) {
+            lrptModeM2x = config.conf[name]["lrptModeM2x"];
+        }
         config.release();
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
@@ -118,7 +121,7 @@ public:
         symSink.init(&reshape.out, symSinkHandler, this);
         sink.init(&sinkStream, sinkHandler, this);
 
-        decoder = std::make_unique<LRPTDecoder>(lrptDiff);
+        decoder = std::make_unique<LRPTDecoder>(lrptModeM2x ? LRPTDecoder::MODE_M2X : LRPTDecoder::MODE_LEGACY, lrptDiff);
 
         demod.start();
         split.start();
@@ -241,6 +244,28 @@ private:
         if (ImGui::Checkbox(CONCAT("Decode LRPT (live)##lrpt_live", _this->name), &_this->liveDecode)) {
             // Nothing else needed; sinkHandler checks the flag.
         }
+
+        // Satellite / coding mode
+        ImGui::TextUnformatted("Satellite:");
+        ImGui::SetNextItemWidth(menuWidth);
+        int modeIdx = _this->lrptModeM2x ? 0 : 1;
+        const char* modeItems = "Meteor-M2-3 / M2-4 (M2-x)\0Meteor-M2 (ancien, 72k QPSK)\0";
+        if (ImGui::Combo(CONCAT("##lrpt_mode", _this->name), &modeIdx, modeItems)) {
+            _this->lrptModeM2x = (modeIdx == 0);
+            if (_this->decoder)
+                _this->decoder->setMode(_this->lrptModeM2x ? LRPTDecoder::MODE_M2X : LRPTDecoder::MODE_LEGACY);
+            config.acquire();
+            config.conf[_this->name]["lrptModeM2x"] = _this->lrptModeM2x;
+            // M2-3 / M2-4 transmit OQPSK: enable it automatically on the demod.
+            if (_this->lrptModeM2x && !_this->oqpsk) {
+                _this->oqpsk = true;
+                _this->demod.setOQPSK(true);
+                config.conf[_this->name]["oqpsk"] = true;
+            }
+            config.release(true);
+        }
+        if (_this->lrptModeM2x)
+            ImGui::TextDisabled("M2-3 = 137.9 MHz, M2-4 = 137.1 MHz (cocher OQPSK)");
 
         if (ImGui::Checkbox(CONCAT("Differential decode##lrpt_diff", _this->name), &_this->lrptDiff)) {
             if (_this->decoder) _this->decoder->setDiffDecode(_this->lrptDiff);
@@ -544,7 +569,8 @@ private:
     // LRPT decode
     std::unique_ptr<LRPTDecoder> decoder;
     bool liveDecode = false;
-    bool lrptDiff = false;
+    bool lrptDiff = true;
+    bool lrptModeM2x = true;
 
     int viewMode = 0; // 0 = composite, 1..6 = channels
     int compR = 0, compG = 1, compB = 2;

@@ -229,12 +229,13 @@ private:
     }
 
     // ======================= Scheduler =======================================
-    // One armed pass: track this satellite from AOS to LOS.
+    // One armed pass: track this satellite, on this downlink, from AOS to LOS.
     struct SchedEntry {
         sattrack::TLE tle;
         double aosUnix = 0;
         double losUnix = 0;
         double maxElDeg = 0;
+        double downlinkHz = 0;   // captured at arm time, applied on activation
         bool   done = false;
     };
 
@@ -273,13 +274,13 @@ private:
             if (want != activeSchedNorad.load()) {
                 activeSchedNorad.store(want);
                 if (haveActive) {
-                    // Point the tracker at the scheduled satellite and let the
-                    // engine's Doppler loop take over for the whole pass.
+                    // Point the tracker at the scheduled satellite and apply the
+                    // downlink captured for THIS pass, then let the engine's
+                    // Doppler loop take over for the whole pass.
                     engine.setTLE(active.tle);
-                    double hz; std::string lbl;
-                    if (sattrack::lookupDownlink(active.tle.norad, hz, lbl)) {
-                        engine.setDownlink(hz);
-                        downlinkHz = hz;
+                    if (active.downlinkHz > 0) {
+                        engine.setDownlink(active.downlinkHz);
+                        downlinkHz = active.downlinkHz;
                     }
                     engine.setCorrectionEnabled(true);
                     selectedNorad = active.tle.norad;
@@ -302,13 +303,27 @@ private:
         engine.computePasses(tle, 6, predList);
     }
 
-    // Arm a specific predicted pass for a satellite.
+    // Arm a specific predicted pass for a satellite, capturing the downlink to
+    // use for it. Prefers the frequency currently shown for that satellite (so a
+    // preset/manual choice is honored), falling back to the table default.
     void schedulePass(const sattrack::TLE& tle, const sattrack::TrackerEngine::PassInfo& p) {
         SchedEntry e;
         e.tle = tle;
         e.aosUnix = p.aosUnix;
         e.losUnix = p.losUnix;
         e.maxElDeg = p.maxElDeg;
+
+        // The armed sat is the one selected above, whose downlink is in
+        // downlinkHz (auto-filled / preset / manually typed). Use it; if for any
+        // reason it isn't that sat, fall back to the table default.
+        if (tle.norad == selectedNorad && downlinkHz > 0) {
+            e.downlinkHz = downlinkHz;
+        }
+        else {
+            double hz; std::string lbl;
+            e.downlinkHz = sattrack::lookupDownlink(tle.norad, hz, lbl) ? hz : 0.0;
+        }
+
         std::lock_guard<std::mutex> lck(schedMtx);
         // Avoid duplicates (same sat + same AOS within 30 s).
         for (auto& s : schedule) {
@@ -855,11 +870,12 @@ private:
             if (snapSched.empty()) {
                 ImGui::TextDisabled("No passes armed.");
             }
-            else if (ImGui::BeginTable(CONCAT("##sched_tbl_", name), 5,
+            else if (ImGui::BeginTable(CONCAT("##sched_tbl_", name), 6,
                          ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("Satellite");
                 ImGui::TableSetupColumn("AOS");
                 ImGui::TableSetupColumn("El");
+                ImGui::TableSetupColumn("Downlink");
                 ImGui::TableSetupColumn("Status");
                 ImGui::TableSetupColumn("");
                 ImGui::TableHeadersRow();
@@ -874,6 +890,9 @@ private:
                     ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(ab);
                     ImGui::TableSetColumnIndex(2); ImGui::Text("%.0f\xC2\xB0", e.maxElDeg);
                     ImGui::TableSetColumnIndex(3);
+                    if (e.downlinkHz > 0) { ImGui::Text("%.3f", e.downlinkHz / 1e6); }
+                    else { ImGui::TextDisabled("-"); }
+                    ImGui::TableSetColumnIndex(4);
                     if (e.tle.norad == activeSchedNorad.load()) {
                         ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "ACTIVE");
                     }
@@ -885,7 +904,7 @@ private:
                         if (mins >= 0) { ImGui::Text("in %dm", mins); }
                         else { ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "passing"); }
                     }
-                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TableSetColumnIndex(5);
                     if (ImGui::SmallButton(CONCAT(CONCAT("X##sched_del_", name), std::to_string(i)))) {
                         removeIdx = (int)i;
                     }

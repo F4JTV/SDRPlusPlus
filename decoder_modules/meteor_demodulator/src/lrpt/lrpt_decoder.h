@@ -49,7 +49,7 @@
  */
 class LRPTDecoder {
 public:
-    enum Mode { MODE_LEGACY = 0, MODE_M2X = 1 };
+    enum Mode { MODE_LEGACY = 0, MODE_M2X = 1, MODE_M2X_INT = 2 };
 
     static constexpr int FRAME_SIZE = 1024;
     static constexpr int ENCODED_FRAME_SIZE = 1024 * 8 * 2; // 16384
@@ -174,7 +174,8 @@ private:
     }
 
     void workerLoop() {
-        if (d_mode == MODE_M2X) runM2x();
+        if (d_mode == MODE_M2X_INT) runM2x(true);
+        else if (d_mode == MODE_M2X) runM2x(false);
         else runLegacy();
     }
 
@@ -255,8 +256,10 @@ private:
         }
     };
 
-    // ============ M2-X (OQPSK + interleaved, Viterbi1_2) ============
-    void runM2x() {
+    // ============ M2-X (OQPSK, Viterbi1_2) ============
+    // interleaved == false : non-interleaved 72k (Meteor-M2-3 typical)
+    // interleaved == true  : interleaved 80k    (Meteor-M2-4 / alt)
+    void runM2x(bool interleaved) {
         const float ber_thresold = 0.170f;
         const int   outsync_after = 5;
 
@@ -284,30 +287,32 @@ private:
         };
 
         while (!stopWorker.load()) {
-            // Deinterleave two phase candidates
-            int r1 = deint1.read_samples(
-                [&file_reader](int8_t* buf, size_t len) -> int { return (bool)file_reader.read1(buf, len); },
-                buffer, 8192);
-            int r2 = deint2.read_samples(
-                [&file_reader](int8_t* buf, size_t len) -> int { return (bool)file_reader.read2(buf, len); },
-                buffer2, 8192);
-            if (r1 || r2 || file_reader.iserror) {
-                if (stopWorker.load()) break;
-                else break; // input ended
-            }
-
-            int vitout = 0, vitout1 = 0, vitout2 = 0;
-            vitout1 = vit1.work(buffer,  BUFFER_SIZE, viterbi_out.data());
-            vitout2 = vit2.work(buffer2, BUFFER_SIZE, viterbi_out2.data());
-
+            int vitout = 0;
             uint8_t* vout = viterbi_out.data();
-            if (vit2.getState() > vit1.getState()) {
-                vitout = vitout2;
-                ber = vit2.ber();
-                locked = vit2.getState() > 0;
-                vout = viterbi_out2.data();
-            } else {
-                vitout = vitout1;
+
+            if (interleaved) {
+                // Deinterleave two phase candidates, keep whichever Viterbi locks best
+                int r1 = deint1.read_samples(
+                    [&file_reader](int8_t* buf, size_t len) -> int { return (bool)file_reader.read1(buf, len); },
+                    buffer, 8192);
+                int r2 = deint2.read_samples(
+                    [&file_reader](int8_t* buf, size_t len) -> int { return (bool)file_reader.read2(buf, len); },
+                    buffer2, 8192);
+                if (r1 || r2 || file_reader.iserror) break;
+
+                int vitout1 = vit1.work(buffer,  BUFFER_SIZE, viterbi_out.data());
+                int vitout2 = vit2.work(buffer2, BUFFER_SIZE, viterbi_out2.data());
+                if (vit2.getState() > vit1.getState()) {
+                    vitout = vitout2; ber = vit2.ber(); locked = vit2.getState() > 0;
+                    vout = viterbi_out2.data();
+                } else {
+                    vitout = vitout1; ber = vit1.ber(); locked = vit1.getState() > 0;
+                }
+            }
+            else {
+                // Non-interleaved: read straight, single Viterbi1_2 (does its own phase/IQ search)
+                if (!readData(buffer, BUFFER_SIZE)) break;
+                vitout = vit1.work(buffer, BUFFER_SIZE, viterbi_out.data());
                 ber = vit1.ber();
                 locked = vit1.getState() > 0;
             }

@@ -29,7 +29,7 @@ SDRPP_MOD_INFO{
     /* Name:            */ "meteor_demodulator",
     /* Description:     */ "Meteor demodulator + LRPT image decoder for SDR++",
     /* Author:          */ "Ryzerth;F4JTV (LRPT decode, ported from SatDump)",
-    /* Version:         */ 0, 3, 0,
+    /* Version:         */ 0, 3, 1,
     /* Max instances    */ -1
 };
 
@@ -107,13 +107,13 @@ public:
         if (config.conf[name].contains("lrptDiff")) {
             lrptDiff = config.conf[name]["lrptDiff"];
         }
-        if (config.conf[name].contains("lrptModeM2x")) {
-            lrptModeM2x = config.conf[name]["lrptModeM2x"];
+        if (config.conf[name].contains("lrptMode")) {
+            lrptMode = config.conf[name]["lrptMode"];
         }
         config.release();
 
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE, true);
-        demod.init(vfo->output, 72000.0f, INPUT_SAMPLE_RATE, 33, 0.6f, 0.1f, 0.005f, brokenModulation, oqpsk, 1e-6, 0.01);
+        demod.init(vfo->output, (float)symbolrateForIndex(lrptMode), INPUT_SAMPLE_RATE, 33, 0.6f, 0.1f, 0.005f, brokenModulation, oqpsk, 1e-6, 0.01);
         split.init(&demod.out);
         split.bindStream(&symSinkStream);
         split.bindStream(&sinkStream);
@@ -121,7 +121,7 @@ public:
         symSink.init(&reshape.out, symSinkHandler, this);
         sink.init(&sinkStream, sinkHandler, this);
 
-        decoder = std::make_unique<LRPTDecoder>(lrptModeM2x ? LRPTDecoder::MODE_M2X : LRPTDecoder::MODE_LEGACY, lrptDiff);
+        decoder = std::make_unique<LRPTDecoder>(decoderModeForIndex(lrptMode), lrptDiff);
 
         demod.start();
         split.start();
@@ -184,6 +184,35 @@ public:
     }
 
 private:
+    // LRPT mode index -> decoder mode / symbol rate
+    static LRPTDecoder::Mode decoderModeForIndex(int idx) {
+        if (idx == 1) return LRPTDecoder::MODE_M2X_INT; // M2-4, 80k interleaved
+        if (idx == 2) return LRPTDecoder::MODE_LEGACY;  // old M2, 72k QPSK
+        return LRPTDecoder::MODE_M2X;                   // M2-3, 72k OQPSK non-interleaved
+    }
+    static double symbolrateForIndex(int idx) {
+        return (idx == 1) ? 80000.0 : 72000.0; // M2-4 is 80k, the rest 72k
+    }
+    static bool oqpskForIndex(int idx) {
+        return (idx == 0 || idx == 1); // M2-3 / M2-4 are OQPSK; legacy is QPSK
+    }
+
+    // Apply a satellite-mode change: decoder pipeline + demod symbol rate + OQPSK.
+    void applyLrptMode(int idx) {
+        lrptMode = idx;
+        if (decoder) decoder->setMode(decoderModeForIndex(idx));
+        demod.setSymbolrate(symbolrateForIndex(idx));
+        bool wantOqpsk = oqpskForIndex(idx);
+        if (wantOqpsk != oqpsk) {
+            oqpsk = wantOqpsk;
+            demod.setOQPSK(oqpsk);
+        }
+        config.acquire();
+        config.conf[name]["lrptMode"] = lrptMode;
+        config.conf[name]["oqpsk"] = oqpsk;
+        config.release(true);
+    }
+
     static void menuHandler(void* ctx) {
         MeteorDemodulatorModule* _this = (MeteorDemodulatorModule*)ctx;
 
@@ -248,24 +277,17 @@ private:
         // Satellite / coding mode
         ImGui::TextUnformatted("Satellite:");
         ImGui::SetNextItemWidth(menuWidth);
-        int modeIdx = _this->lrptModeM2x ? 0 : 1;
-        const char* modeItems = "Meteor-M2-3 / M2-4 (M2-x)\0Meteor-M2 (ancien, 72k QPSK)\0";
-        if (ImGui::Combo(CONCAT("##lrpt_mode", _this->name), &modeIdx, modeItems)) {
-            _this->lrptModeM2x = (modeIdx == 0);
-            if (_this->decoder)
-                _this->decoder->setMode(_this->lrptModeM2x ? LRPTDecoder::MODE_M2X : LRPTDecoder::MODE_LEGACY);
-            config.acquire();
-            config.conf[_this->name]["lrptModeM2x"] = _this->lrptModeM2x;
-            // M2-3 / M2-4 transmit OQPSK: enable it automatically on the demod.
-            if (_this->lrptModeM2x && !_this->oqpsk) {
-                _this->oqpsk = true;
-                _this->demod.setOQPSK(true);
-                config.conf[_this->name]["oqpsk"] = true;
-            }
-            config.release(true);
+        const char* modeItems =
+            "Meteor-M2-3 (72k OQPSK)\0"
+            "Meteor-M2-4 (80k entrelace)\0"
+            "Meteor-M2 (ancien, 72k QPSK)\0";
+        if (ImGui::Combo(CONCAT("##lrpt_mode", _this->name), &_this->lrptMode, modeItems)) {
+            _this->applyLrptMode(_this->lrptMode);
         }
-        if (_this->lrptModeM2x)
-            ImGui::TextDisabled("M2-3 = 137.9 MHz, M2-4 = 137.1 MHz (cocher OQPSK)");
+        if (_this->lrptMode == 0)
+            ImGui::TextDisabled("M2-3 = 137.9 MHz (OQPSK, non entrelace)");
+        else if (_this->lrptMode == 1)
+            ImGui::TextDisabled("M2-4 = 137.1/137.9 MHz (OQPSK 80k entrelace)");
 
         if (ImGui::Checkbox(CONCAT("Differential decode##lrpt_diff", _this->name), &_this->lrptDiff)) {
             if (_this->decoder) _this->decoder->setDiffDecode(_this->lrptDiff);
@@ -570,7 +592,7 @@ private:
     std::unique_ptr<LRPTDecoder> decoder;
     bool liveDecode = false;
     bool lrptDiff = true;
-    bool lrptModeM2x = true;
+    int  lrptMode = 0; // 0 = M2-3 (72k OQPSK), 1 = M2-4 (80k interleaved), 2 = legacy M2 (72k QPSK)
 
     int viewMode = 0; // 0 = composite, 1..6 = channels
     int compR = 0, compG = 1, compB = 2;

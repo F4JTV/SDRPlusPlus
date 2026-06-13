@@ -72,6 +72,7 @@ option(OPT_BUILD_FREEDV_DECODER "Build the FreeDV digital voice decoder (Depende
 option(OPT_BUILD_FT8_DECODER "Build the FT8/FT4/WSPR decoder module (Dependencies: fftw3)" ON)
 option(OPT_BUILD_GPS_DECODER "Build the GPS L1 C/A decoder module" ON)
 option(OPT_BUILD_HELL_DECODER "Build the Hellschreiber decoder module" ON)
+option(OPT_BUILD_HFDL_DECODER "Build the HFDL decoder module (requires dumphfdl at runtime)" ON)
 option(OPT_BUILD_MFSK_DECODER "Build the MFSK decoder module" ON)
 option(OPT_BUILD_MT63_DECODER "Build the MT63 decoder module" ON)
 option(OPT_BUILD_NAVTEX_DECODER "Build NAVTEX decoder" ON)
@@ -397,6 +398,10 @@ endif (OPT_BUILD_GPS_DECODER)
 if (OPT_BUILD_HELL_DECODER)
 add_subdirectory("decoder_modules/hell_decoder")
 endif (OPT_BUILD_HELL_DECODER)
+
+if (OPT_BUILD_HFDL_DECODER)
+add_subdirectory("decoder_modules/hfdl_decoder")
+endif (OPT_BUILD_HFDL_DECODER)
 
 if (OPT_BUILD_MFSK_DECODER)
 add_subdirectory("decoder_modules/mfsk_decoder")

@@ -72,6 +72,7 @@ option(OPT_BUILD_FT8_DECODER "Build the FT8/FT4/WSPR decoder module (Dependencie
 option(OPT_BUILD_GPS_DECODER "Build the GPS L1 C/A decoder module" ON)
 option(OPT_BUILD_HELL_DECODER "Build the Hellschreiber decoder module" ON)
 option(OPT_BUILD_MFSK_DECODER "Build the MFSK decoder module" ON)
+option(OPT_BUILD_MT63_DECODER "Build the MT63 decoder module" ON)
 option(OPT_BUILD_NAVTEX_DECODER "Build NAVTEX decoder" ON)
 option(OPT_BUILD_OLIVIA_DECODER "Build the Olivia MFSK decoder module" ON)
 option(OPT_BUILD_PSK_DECODER "Build the PSK decoder module" ON)
@@ -395,6 +396,10 @@ endif (OPT_BUILD_HELL_DECODER)
 if (OPT_BUILD_MFSK_DECODER)
 add_subdirectory("decoder_modules/mfsk_decoder")
 endif (OPT_BUILD_MFSK_DECODER)
+
+if (OPT_BUILD_MT63_DECODER)
+add_subdirectory("decoder_modules/mt63_decoder")
+endif (OPT_BUILD_MT63_DECODER)
 
 if (OPT_BUILD_NAVTEX_DECODER)
 add_subdirectory("decoder_modules/navtex_decoder")

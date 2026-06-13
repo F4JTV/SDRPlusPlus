@@ -38,7 +38,7 @@ sudo apt install -y build-essential cmake git pkg-config libfftw3-dev \
     libxcb-randr0-dev libxcb-keysyms1-dev \
     libglew-dev nlohmann-json3-dev \
     libglib2.0-dev zlib1g-dev libxml2-dev \
-    libpulse-dev liblapack-dev \
+    libpulse-dev liblapack-dev libconfig++-dev \
     socat rtl-sdr wget libncurses-dev libncurses6 \
     libjansson-dev libsqlite3-dev libzmq3-dev libprotobuf-c-dev
 
